@@ -9,6 +9,7 @@ class JudgmentCheck(BaseModel):
     criterion_id: str
     result: Literal["pass", "no_pass"]
     evidence: str
+    explanation: str
     precedents_used: list[str] = Field(default_factory=list)
     adjustments_used: list[str] = Field(default_factory=list)
 
@@ -23,8 +24,16 @@ class Citation(BaseModel):
     ref: str
 
 
+class OverrideAction(BaseModel):
+    type: Literal["override_check"]
+    criterion_id: str
+    result: Literal["pass", "flag", "no_pass"] | None
+    reason: str = ""
+
+
 class AnswerOutput(BaseModel):
     answer: str
+    action: OverrideAction | None = None
     citations: list[Citation] = Field(default_factory=list)
 
 

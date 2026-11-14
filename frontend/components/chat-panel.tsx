@@ -1,10 +1,10 @@
 "use client";
 
-import { Bot, LoaderCircle, Send, X } from "lucide-react";
+import { ArrowUp, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Badge, Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import type { Citation } from "@/lib/types";
+import type { Citation, OverrideReport } from "@/lib/types";
 
 export interface ChatMessage {
   id: string;
@@ -14,6 +14,7 @@ export interface ChatMessage {
   txnId?: string;
   evaluationId?: string;
   author?: string;
+  override?: OverrideReport | null;
 }
 
 export interface ChatPanelProps {
@@ -59,12 +60,23 @@ export function ChatPanel({
 
       <div role="log" aria-label="Conversation with validation agent" aria-live="polite" aria-relevant="additions text" className="min-h-48 flex-1 space-y-5 overflow-y-auto p-5">
         {messages.map((message) => (
-          <article key={message.id} className={cn("space-y-2 rounded-xl border p-4", message.role === "user" ? "ml-6 border-border-subtle bg-surface-2" : "mr-3 border-accent/30 bg-accent-subtle")}>
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              {message.role === "agent" && <Bot className="size-4 text-accent-fg" aria-hidden="true" />}
-              <span className="font-semibold">{message.author || (message.role === "agent" ? "Agent" : "You")}</span>
-              {message.txnId && <span className="font-mono text-xs text-text-subtle">{message.txnId}</span>}
-            </div>
+          <article key={message.id} aria-label={message.role === "user" ? "Your message" : "Agent response"}
+            className={cn("space-y-2", message.role === "user"
+              ? "ml-auto w-fit max-w-[calc(100%-1.5rem)] rounded-2xl border border-border-subtle bg-surface-2 px-4 py-3"
+              : "py-2")}>
+            {message.txnId && <p className="font-mono text-xs text-text-subtle">{message.txnId}</p>}
+            {message.role === "agent" && message.override && (
+              <p className={cn("flex flex-wrap items-center gap-x-2 gap-y-1 border-l-2 py-1 pl-3 text-base font-medium",
+                message.override.status === "applied" ? "border-status-info-border text-status-info-fg"
+                  : message.override.status === "denied" ? "border-status-negative-border text-status-negative-fg"
+                    : "border-status-attention-border text-status-attention-fg")}>
+                <span>{message.override.status === "applied" ? "Override applied" : message.override.status === "denied" ? "Override denied" : "Override needs a reason"}</span>
+                <span className="font-mono">{message.override.criterion_id}</span>
+                <span>{message.override.status === "applied"
+                  ? `${message.override.from.replaceAll("_", "-").toUpperCase()} → ${message.override.to.replaceAll("_", "-").toUpperCase()}`
+                  : "No check changed"}</span>
+              </p>
+            )}
             <p className="whitespace-pre-wrap break-words text-base leading-relaxed">{message.text}</p>
             {!!message.citations?.length && (
               <div className="flex flex-wrap gap-2" aria-label="Answer citations">
@@ -85,7 +97,7 @@ export function ChatPanel({
         <div ref={bottom} />
       </div>
 
-      <div className="space-y-3 border-t border-border-subtle bg-surface-1 p-4">
+      <div className="shrink-0 space-y-3 px-4 pt-2 pb-4">
         {focus && (
           <div className="flex items-center gap-2 text-sm">
             <span className="text-text-muted">About:</span>
@@ -95,17 +107,19 @@ export function ChatPanel({
           </div>
         )}
         {error && <p role="alert" className="rounded-md border border-status-negative-border bg-status-negative-bg px-3 py-2 text-sm text-status-negative-fg">{error}</p>}
-        <form onSubmit={send} className="flex items-end gap-2">
+        <form onSubmit={send} className="rounded-[28px] border border-border-default bg-surface-2 p-3 shadow-sm transition-colors focus-within:border-border-focus">
           <label htmlFor="chat-question" className="sr-only">Ask the validation agent</label>
           <textarea ref={input} id="chat-question" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               event.currentTarget.form?.requestSubmit();
             }
-          }} rows={2} disabled={disabled} placeholder={focus ? `Ask about ${focus.txnId}…` : "Ask about a policy…"} className="min-h-16 min-w-0 flex-1 resize-none rounded-lg border border-border-default bg-surface-base px-3 py-2 text-base placeholder:text-text-subtle focus-visible:outline-2 focus-visible:outline-border-focus disabled:opacity-50" />
-          <Button type="submit" disabled={busy || disabled || !draft.trim()} aria-label="Send question" className="h-12 w-12 shrink-0 rounded-lg p-0">
-            {busy ? <LoaderCircle className="size-5 animate-spin" aria-hidden="true" /> : <Send className="size-5" aria-hidden="true" />}
-          </Button>
+          }} rows={2} disabled={disabled} placeholder={focus ? `Ask about ${focus.txnId}…` : "Ask about a policy…"} className="block min-h-16 max-h-48 w-full min-w-0 resize-none overflow-y-auto border-0 bg-transparent px-2 py-2 text-base leading-relaxed text-text-default placeholder:text-text-subtle focus:outline-none disabled:opacity-50 [field-sizing:content]" />
+          <div className="mt-2 flex justify-end">
+            <Button type="submit" disabled={busy || disabled || !draft.trim()} aria-label="Send question" className="h-10 w-10 shrink-0 rounded-full bg-text-default p-0 text-surface-base hover:bg-text-default hover:opacity-80 disabled:opacity-35">
+              {busy ? <LoaderCircle className="size-5 animate-spin" aria-hidden="true" /> : <ArrowUp className="size-5" strokeWidth={2.5} aria-hidden="true" />}
+            </Button>
+          </div>
         </form>
       </div>
     </section>

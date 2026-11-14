@@ -4,6 +4,7 @@ from typing import Any
 
 from app.db import get_db
 from app.server.errors import ApiError
+from app.server.serialization import public_data
 
 NO_ID = {"_id": 0}
 
@@ -46,6 +47,7 @@ async def get_check_references(eval_id: str, criterion_id: str) -> dict[str, Any
     )
     if check is None:
         raise ApiError(404, "not_found", f"Unknown criterion '{criterion_id}' in '{eval_id}'")
+    check = public_data(check)
 
     policy = await _policy_for_evaluation(evaluation)
     criterion = next(
@@ -95,7 +97,9 @@ async def get_check_references(eval_id: str, criterion_id: str) -> dict[str, Any
 
     return {
         "check": {
-            **{key: check[key] for key in ("criterion_id", "result", "source", "evidence")},
+            **{key: check[key] for key in (
+                "criterion_id", "result", "effective_result", "override", "source", "evidence"
+            )},
             # Older evaluations may predate these fields.
             "explanation": check.get("explanation") or check["evidence"],
             "facts": check.get("facts", []),

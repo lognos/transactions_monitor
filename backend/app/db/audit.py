@@ -6,6 +6,7 @@ Every application write after seeding goes through write_with_audit.
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 GENESIS_HASH = "0" * 64
@@ -45,9 +46,92 @@ async def write_with_audit(
     Steps (docs/plan-db.md): bump chain_head.seq, build the event with
     prev_hash = chain_head.hash, apply writes, insert the event, update chain_head.
     """
-    raise NotImplementedError("db.audit.write_with_audit")
+    from app.db.client import get_db
+
+    db = get_db()
+
+    async def apply(session):
+        head = await db.chain_head.find_one_and_update(
+            {"_id": "head"},
+            {"$inc": {"seq": 1}, "$setOnInsert": {"hash": GENESIS_HASH}},
+            upsert=True,
+            session=session,
+        )
+        seq = head["seq"] + 1 if head else 1
+        prev_hash = head["hash"] if head else GENESIS_HASH
+        entry = {
+            "seq": seq,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "actor": actor,
+            "event": event,
+            "txn_id": txn_id,
+            "ref": ref,
+            "detail": detail,
+            "prev_hash": prev_hash,
+        }
+        entry["hash"] = compute_hash(prev_hash, entry)
+        for write in writes:
+            collection = db[write.collection]
+            if write.op == "insert":
+                await collection.insert_one(dict(write.document), session=session)
+            else:
+                result = await collection.update_one(write.filter, write.update, session=session)
+                if result.matched_count != 1:
+                    raise ValueError(f"Missing document for audited update in {write.collection}")
+        await db.audit_log.insert_one(entry.copy(), session=session)
+        await db.chain_head.update_one(
+            {"_id": "head"}, {"$set": {"hash": entry["hash"]}}, session=session,
+        )
+        return entry
+
+    async with db.client.start_session() as session:
+        return await session.with_transaction(apply)
 
 
 async def verify_chain() -> dict[str, Any]:
     """Return {"ok", "checked", "broken_at_seq", "reason"}."""
-    raise NotImplementedError("db.audit.verify_chain")
+    from app.db.client import get_db
+
+    db = get_db()
+    events = await db.audit_log.find({}, {"_id": 0}).sort("seq", 1).to_list(length=None)
+
+    expected_prev = GENESIS_HASH
+    checked = 0
+
+    for expected_seq, doc in enumerate(events, start=1):
+        seq = doc.get("seq")
+        if seq != expected_seq:
+            return {
+                "ok": False,
+                "checked": checked,
+                "broken_at_seq": seq if seq is not None else expected_seq,
+                "reason": f"sequence gap: expected {expected_seq}, got {seq}",
+            }
+
+        if doc.get("prev_hash") != expected_prev:
+            return {
+                "ok": False,
+                "checked": checked,
+                "broken_at_seq": seq,
+                "reason": "prev_hash mismatch",
+            }
+
+        event_body = {k: v for k, v in doc.items() if k != "hash"}
+        expected_hash = compute_hash(expected_prev, event_body)
+        if doc.get("hash") != expected_hash:
+            return {
+                "ok": False,
+                "checked": checked,
+                "broken_at_seq": seq,
+                "reason": "hash mismatch",
+            }
+
+        expected_prev = doc["hash"]
+        checked += 1
+
+    return {
+        "ok": True,
+        "checked": checked,
+        "broken_at_seq": None,
+        "reason": "ok",
+    }

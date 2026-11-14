@@ -19,7 +19,9 @@ from app.db.audit import verify_chain
 from app.server.deps import current_principal
 from app.server.errors import ApiError, install_error_handlers
 from app.server.references import get_check_references, label_citations
-from app.server.schemas import AskBody, ChatBody, DecideBody, EvaluatePendingBody
+from app.server.schemas import (
+    AskBody, ChatBody, DecideBody, EvaluatePendingBody, OverrideBody, SimulateBody,
+)
 from app.server.serialization import public_data
 
 NO_ID = {"_id": 0}
@@ -61,7 +63,15 @@ async def list_principals() -> dict[str, Any]:
 
 async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
     cursor = await get_db().transactions.aggregate([
-        {"$match": query},
+        # Raw CSV imports share this collection, but are not review-ready.
+        # Do not invent workflow status or amounts for unnormalized records.
+        {"$match": {"$and": [query, {
+            "txn_id": {"$type": "string"},
+            "type": {"$in": ["wire", "cheque", "eft", "interac", "pad", "bill_payment"]},
+            "amount": {"$type": "number"},
+            "currency": {"$type": "string"},
+            "status": {"$in": ["pending", "awaiting_review", "passed", "rejected"]},
+        }]}},
         {"$sort": {"created_at": 1, "txn_id": 1}},
         {"$lookup": {
             "from": "customers", "localField": "customer_id",
@@ -74,7 +84,8 @@ async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
                             "status": {"$ne": "superseded"}}},
                 {"$sort": {"created_at": -1, "eval_id": -1}},
                 {"$limit": 1},
-                {"$project": {"_id": 0, "eval_id": 1, "recommendation": 1, "checks": 1}},
+                {"$project": {"_id": 0, "eval_id": 1, "recommendation": 1,
+                              "effective_recommendation": 1, "checks": 1}},
             ],
             "as": "latest",
         }},
@@ -86,10 +97,19 @@ async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
             "counterparty_name": {"$ifNull": ["$counterparty.name", None]},
             "eval_id": {"$ifNull": ["$latest.eval_id", None]},
             "recommendation": {"$ifNull": ["$latest.recommendation", None]},
+            "effective_recommendation": {"$ifNull": [
+                "$latest.effective_recommendation", "$latest.recommendation", None,
+            ]},
+            "override_count": {"$size": {"$filter": {
+                "input": {"$ifNull": ["$latest.checks", []]},
+                "as": "check", "cond": {"$ne": [{"$ifNull": ["$$check.override", None]}, None]},
+            }}},
             "failed_checks": {"$map": {
                 "input": {"$filter": {
                     "input": {"$ifNull": ["$latest.checks", []]},
-                    "as": "check", "cond": {"$eq": ["$$check.result", "no_pass"]},
+                    "as": "check", "cond": {"$eq": [
+                        {"$ifNull": ["$$check.effective_result", "$$check.result"]}, "no_pass",
+                    ]},
                 }},
                 "as": "check", "in": "$$check.criterion_id",
             }},
@@ -123,14 +143,16 @@ async def evaluate_pending(
     _require_refresh_support()
     statuses = ["pending", "awaiting_review"] if body.refresh else ["pending"]
     txns = await _transaction_rows({"status": {"$in": statuses}})
+    if body.refresh:
+        txns = [txn for txn in txns if txn["override_count"] == 0]
 
     async def evaluate_one(txn: dict[str, Any]) -> dict[str, Any]:
         result = await evaluate(txn["txn_id"], refresh=body.refresh, principal=principal)
         return {
             "txn_id": txn["txn_id"], "eval_id": result["eval_id"],
             "recommendation": result["recommendation"],
-            "changed": txn["recommendation"] is not None
-            and txn["recommendation"] != result["recommendation"],
+            "changed": txn["effective_recommendation"] is not None
+            and txn["effective_recommendation"] != result["effective_recommendation"],
         }
 
     results = await asyncio.gather(*(evaluate_one(txn) for txn in txns), return_exceptions=True)
@@ -150,6 +172,19 @@ async def evaluate_pending(
     return public_data({"evaluated": evaluated, "failed": failed})
 
 
+@app.post("/transactions/simulate")
+async def simulate(
+    body: SimulateBody, principal: dict = Principal,
+) -> dict[str, Any]:
+    result = await agent.run_simulate(
+        principal_id=principal["_id"],
+        count=body.count,
+        mode=body.mode,
+        policy_only=body.policy_only,
+    )
+    return public_data(result)
+
+
 @app.post("/transactions/{txn_id}/evaluate")
 async def evaluate(
     txn_id: str, refresh: bool = False, principal: dict = Principal,
@@ -166,7 +201,9 @@ async def evaluate(
     )
     if existing and existing["status"] == "decided":
         raise ApiError(409, "already_decided", f"Transaction '{txn_id}' already has a decision")
-    if txn["status"] == "awaiting_review" and existing and not refresh:
+    # Section 8 protects overrides from every refresh, including a direct call.
+    has_overrides = existing and any(c.get("override") is not None for c in existing["checks"])
+    if existing and (has_overrides or (txn["status"] == "awaiting_review" and not refresh)):
         customer = await db.customers.find_one({"customer_id": txn["customer_id"]}, NO_ID)
         return public_data({**existing, "transaction": txn, "customer": customer})
     _require_refresh_support()
@@ -184,7 +221,28 @@ async def _evaluation_or_404(eval_id: str) -> dict[str, Any]:
     evaluation = await get_db().evaluations.find_one({"eval_id": eval_id}, NO_ID)
     if evaluation is None:
         raise ApiError(404, "not_found", f"Unknown evaluation '{eval_id}'")
-    return evaluation
+    return public_data(evaluation)
+
+
+def _require_reviewable(evaluation: dict[str, Any]) -> None:
+    if evaluation["status"] == "decided":
+        raise ApiError(409, "already_decided", f"Evaluation '{evaluation['eval_id']}' already has a decision")
+    if evaluation["status"] == "superseded":
+        raise ApiError(422, "invalid_request", "This evaluation was superseded. Open the latest evaluation.")
+
+
+def _review_gate(result: dict[str, Any], kind: str) -> dict[str, Any]:
+    gate = result.get("gate")
+    if not isinstance(gate, dict) or gate.get("result") not in ("allow", "deny"):
+        raise NotImplementedError(f"agent.run_review {kind} gate result")
+    return gate
+
+
+def _checks_not_cleared(blocking_checks: list[str]) -> ApiError:
+    return ApiError(
+        409, "checks_not_cleared", f"Clear {' and '.join(blocking_checks)} before approving.",
+        extra={"blocking_checks": blocking_checks},
+    )
 
 
 @app.get("/evaluations/{eval_id}")
@@ -202,6 +260,28 @@ async def get_evaluation(eval_id: str, _: dict = Principal) -> dict[str, Any]:
 @app.get("/evaluations/{eval_id}/checks/{criterion_id}/references")
 async def references(eval_id: str, criterion_id: str, _: dict = Principal) -> dict[str, Any]:
     return public_data(await get_check_references(eval_id, criterion_id))
+
+
+@app.post("/evaluations/{eval_id}/checks/{criterion_id}/override")
+async def override_check(
+    eval_id: str, criterion_id: str, body: OverrideBody, principal: dict = Principal,
+) -> dict[str, Any]:
+    evaluation = await _evaluation_or_404(eval_id)
+    if not any(check["criterion_id"] == criterion_id for check in evaluation["checks"]):
+        raise ApiError(404, "not_found", f"Unknown criterion '{criterion_id}' in '{eval_id}'")
+    _require_reviewable(evaluation)
+    result = await agent.run_review(
+        eval_id=eval_id, principal_id=principal["_id"],
+        review_input={"kind": "override", "criterion_id": criterion_id,
+                      "result": body.result, "reason": body.reason or "", "via": "panel"},
+    )
+    gate = _review_gate(result, "override")
+    if gate["result"] == "deny":
+        txn = await get_db().transactions.find_one({"txn_id": evaluation["txn_id"]}, NO_ID)
+        message = await _gate_denial_message(gate, evaluation, txn, principal, action="override")
+        raise ApiError(403, "gate_denied", message, extra={"gate": gate})
+    # Only the agent writes; return its persisted result, including context.
+    return await get_evaluation(eval_id, principal)
 
 
 @app.post("/chat")
@@ -224,8 +304,16 @@ async def ask(eval_id: str, body: AskBody, principal: dict = Principal) -> dict[
         principal_id=principal["_id"],
         review_input={"kind": "question", "question": body.question},
     )
-    answer = result["answer"]
-    thread = result["evaluation"]["thread"]
+    answer = result.get("answer")
+    if not isinstance(answer, dict) or not isinstance(result.get("evaluation"), dict):
+        raise NotImplementedError("agent.run_review question answer and evaluation")
+    override = result.get("override")
+    updated_evaluation = None
+    if override is not None:
+        override = {key: override[key] for key in ("criterion_id", "from", "to", "status")}
+        if override["status"] == "applied":
+            updated_evaluation = await get_evaluation(eval_id, principal)
+    thread = (updated_evaluation or result["evaluation"])["thread"]
     # Include labels in history too, so reopening a conversation keeps its chips.
     citations = list(answer["citations"])
     for turn in thread:
@@ -234,6 +322,7 @@ async def ask(eval_id: str, body: AskBody, principal: dict = Principal) -> dict[
     labels = {(c["type"], c["ref"]): c["label"] for c in labelled}
     return public_data({
         "answer": answer["answer"], "citations": labelled[:len(answer["citations"])],
+        "override": override, "evaluation": updated_evaluation,
         "thread": [{**turn, "citations": [
             {**c, "label": labels[(c["type"], c["ref"])]} for c in turn.get("citations", [])
         ]} for turn in thread],
@@ -241,9 +330,11 @@ async def ask(eval_id: str, body: AskBody, principal: dict = Principal) -> dict[
 
 
 async def _gate_denial_message(
-    gate: dict[str, Any], evaluation: dict[str, Any], txn: dict[str, Any],
-    principal: dict[str, Any], verdict: str,
+    gate: dict[str, Any], evaluation: dict[str, Any], txn: dict[str, Any] | None,
+    principal: dict[str, Any], action: str = "decide",
 ) -> str:
+    if txn is None:
+        return f"{gate['reason'].rstrip('.')}. Ask an authorized reviewer to review the policy requirements."
     policy = await get_db().policies.find_one(
         {"txn_type": txn["type"], "version": evaluation["policy_version"]}, NO_ID,
     )
@@ -251,7 +342,8 @@ async def _gate_denial_message(
     rule = next((r for r in rules if r["rule_id"] == gate.get("rule_id")), None)
     if rule is None:
         if policy and not any(r["role"] == principal["role"] for r in rules):
-            return f"Role '{principal['role']}' cannot decide. An authorized reviewer must decide."
+            verb = "override checks" if action == "override" else "decide"
+            return f"Role '{principal['role']}' cannot {verb}. An authorized reviewer must {verb}."
     else:
         limit = rule.get("max_amount")
         if limit is not None and txn["amount"] > limit:
@@ -260,36 +352,41 @@ async def _gate_denial_message(
                 and (r.get("max_amount") is None or txn["amount"] <= r["max_amount"])
                 for r in rules
             )
-            action = "A supervisor must decide." if supervisor else "A reviewer with a higher limit must decide."
-            return f"Amount {txn['amount']:g} exceeds {principal['role']} limit {limit:g}. {action}"
-        hard_fails = [c["criterion_id"] for c in evaluation["checks"]
-                      if c["kind"] == "hard" and c["result"] == "no_pass"]
-        if verdict != "rejected" and hard_fails and not rule.get("can_override_hard_fail", False):
-            return (f"Hard checks {', '.join(hard_fails)} failed and cannot be overridden. "
-                    "Resolve the failed checks before validation, or reject with comments.")
+            reviewer = "A supervisor" if supervisor else "A reviewer with a higher limit"
+            verb = "authorize this override" if action == "override" else "decide"
+            return f"Amount {txn['amount']:g} exceeds {principal['role']} limit {limit:g}. {reviewer} must {verb}."
     return f"{gate['reason'].rstrip('.')}. Review the policy requirements before retrying."
 
 
 @app.post("/evaluations/{eval_id}/decide")
 async def decide(eval_id: str, body: DecideBody, principal: dict = Principal) -> dict[str, Any]:
     evaluation = await _evaluation_or_404(eval_id)
-    if evaluation["status"] == "decided":
-        raise ApiError(409, "already_decided", f"Evaluation '{eval_id}' already has a decision")
-    if evaluation["status"] == "superseded":
-        raise ApiError(422, "invalid_request", "This evaluation was superseded. Open the latest evaluation to decide.")
+    _require_reviewable(evaluation)
+    if body.verdict == "approved":
+        blocking_checks = [check["criterion_id"] for check in evaluation["checks"]
+                           if check["effective_result"] == "no_pass"]
+        if blocking_checks:
+            raise _checks_not_cleared(blocking_checks)
+    elif evaluation["effective_recommendation"] == "pass" and not (body.comments or "").strip():
+        raise ApiError(422, "invalid_request", "Comments are required when rejecting an effective pass.")
     result = await agent.run_review(
         eval_id=eval_id,
         principal_id=principal["_id"],
         review_input={"kind": "decision", "verdict": body.verdict, "comments": body.comments},
     )
-    gate = result["gate"]
+    if result.get("blocking_checks"):
+        raise _checks_not_cleared(result["blocking_checks"])
+    gate = _review_gate(result, "decision")
     if gate["result"] == "deny":
-        message = await _gate_denial_message(gate, evaluation, result["txn"], principal, body.verdict)
+        txn = result.get("txn") or await get_db().transactions.find_one({"txn_id": evaluation["txn_id"]}, NO_ID)
+        message = await _gate_denial_message(gate, evaluation, txn, principal)
         raise ApiError(403, "gate_denied", message, extra={"gate": gate})
+    if not isinstance(result.get("decision"), dict) or not isinstance(result.get("txn"), dict):
+        raise NotImplementedError("agent.run_review decision and txn")
     return public_data({
         "decision": result["decision"],
         "transaction_status": result["txn"]["status"],
-        "memory_created": result["memory_created"] or [],
+        "memory_created": result.get("memory_created") or [],
     })
 
 

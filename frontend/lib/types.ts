@@ -1,11 +1,11 @@
 // Shapes from docs/contracts.md. Keep in sync with that file.
 
 export type Role = "analyst" | "supervisor" | "auditor" | "agent";
-export type TxnType = "wire" | "cheque";
+export type TxnType = "wire" | "cheque" | "eft" | "interac" | "pad" | "bill_payment";
 export type TxnStatus = "pending" | "awaiting_review" | "passed" | "rejected";
 export type CheckResult = "pass" | "no_pass" | "flag";
 export type Recommendation = "pass" | "no_pass";
-export type Verdict = "validated" | "validated_with_comments" | "rejected";
+export type Verdict = "approved" | "rejected";
 
 export interface Principal {
   _id: string;
@@ -40,6 +40,8 @@ export interface TransactionSummary {
   status: TxnStatus;
   eval_id: string | null;
   recommendation: Recommendation | null;
+  effective_recommendation: Recommendation | null;
+  override_count: number;
   failed_checks: string[];
   created_at: string;
 }
@@ -56,12 +58,24 @@ export interface CheckFact {
   value: string;
 }
 
+export interface CheckOverride {
+  result: CheckResult;
+  reason: string;
+  by: string;
+  role: Role;
+  via: "panel" | "chat";
+  ts: string;
+  gate: Pick<Gate, "result" | "rule_id"> & Partial<Pick<Gate, "reason">>;
+}
+
 export interface Check {
   criterion_id: string;
   description: string;
   kind: "hard" | "judgment";
   source: "rule" | "llm";
   result: CheckResult;
+  effective_result: CheckResult;
+  override: CheckOverride | null;
   evidence: string;
   explanation?: string;
   facts?: CheckFact[];
@@ -98,8 +112,19 @@ export interface Decision {
   verdict: Verdict;
   comments: string | null;
   agreed_with_agent: boolean;
+  effective_recommendation: Recommendation;
+  overrides: DecisionOverride[];
   gate: Gate;
   ts: string;
+}
+
+export interface DecisionOverride {
+  criterion_id: string;
+  kind: Check["kind"];
+  from: CheckResult;
+  to: CheckResult;
+  reason: string;
+  via: CheckOverride["via"];
 }
 
 export interface Evaluation {
@@ -109,6 +134,7 @@ export interface Evaluation {
   policy_version: number;
   checks: Check[];
   recommendation: Recommendation;
+  effective_recommendation: Recommendation;
   rationale: string;
   precedents_used: string[];
   adjustments_used: string[];
@@ -148,12 +174,26 @@ export interface AskResponse {
   answer: string;
   citations: Citation[];
   thread: ThreadItem[];
+  override: OverrideReport | null;
+  evaluation?: Evaluation;
+}
+
+export interface OverrideReport {
+  criterion_id: string;
+  from: CheckResult;
+  to: CheckResult;
+  status: "applied" | "denied" | "needs_reason";
 }
 
 export interface DecideResponse {
   decision: Decision;
   transaction_status: TxnStatus;
   memory_created: MemoryItem[];
+}
+
+export interface ChecksNotClearedErrorBody {
+  error: { code: "checks_not_cleared"; message: string };
+  blocking_checks: string[];
 }
 
 export interface VerifyResponse {
@@ -173,13 +213,25 @@ export interface EvaluatePendingResponse {
   failed: { txn_id: string; error: string }[];
 }
 
+export interface SimulateResponse {
+  simulated: {
+    txn_id: string;
+    type: TxnType;
+    amount: number;
+    eval_id: string;
+    recommendation: Recommendation;
+    failed_checks: string[];
+  }[];
+  failed: { txn_id: string; error: string }[];
+}
+
 export interface ChatResponse {
   answer: string;
   citations: Citation[];
 }
 
 export interface ReferencesResponse {
-  check: Pick<Check, "criterion_id" | "result" | "source" | "evidence"> & { explanation: string; facts: CheckFact[] };
+  check: Pick<Check, "criterion_id" | "result" | "effective_result" | "override" | "source" | "evidence"> & { explanation: string; facts: CheckFact[] };
   policy: {
     txn_type: TxnType;
     version: number;
