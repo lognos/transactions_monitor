@@ -64,9 +64,15 @@ def create_app() -> FastAPI:
         }}
 
     @app.post('/transactions/{txn_id}/evaluate')
-    async def evaluate(txn_id: str, principal: dict = Depends(current_principal)) -> dict:
+    async def evaluate(
+        txn_id: str, test_llm: bool = False, principal: dict = Depends(current_principal),
+    ) -> dict:
         async with store.lock:
-            state = await evaluate_graph.ainvoke({'txn_id': txn_id, 'principal_id': principal['_id']})
+            state = await evaluate_graph.ainvoke({
+                'txn_id': txn_id, 'principal_id': principal['_id'], 'test_llm': test_llm,
+            })
+            if test_llm:
+                return {'txn_id': txn_id, 'llm_call_succeeded': state['llm_call_succeeded']}
             return evaluation_response(state['evaluation'], state['txn'], state['customer'])
 
     @app.get('/evaluations/{eval_id}')

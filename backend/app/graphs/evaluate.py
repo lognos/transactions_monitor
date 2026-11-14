@@ -2,15 +2,21 @@ from typing import Literal
 
 from langgraph.types import Command
 from langgraph.graph import END, START, StateGraph
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
-from ..checks import CHECKS
+from ..llm import probe_model
+from ..context_memory import build_structured_query
+from ..regulatory_context import retrieve_related_policies
+# Unmodified policy module from origin/ben-policy, isolated from the agent scaffold.
+from ..policy_checks import run_preliminary_screening
 from ..models import RecommendOutput, WorkflowError, Write, new_id, utc_now
 
 
 class EvalInput(TypedDict):
     txn_id: str
     principal_id: str
+    test_llm: NotRequired[bool]
+    skip_policies: NotRequired[bool]
 
 
 class EvalState(EvalInput, total=False):
@@ -18,9 +24,11 @@ class EvalState(EvalInput, total=False):
     customer: dict
     policy: dict
     checks: list[dict]
+    related_policies: list[dict]
     precedents: list[dict]
     adjustments: list[dict]
     llm_output: dict
+    llm_call_succeeded: bool
     evaluation: dict
 
 
@@ -30,7 +38,7 @@ def build_evaluate_graph(*, store, write_with_audit, recommend):
         if txn is None:
             raise WorkflowError(404, 'not_found', 'Unknown transaction.')
         customer = await store.get('customers', txn['customer_id'])
-        if txn['status'] != 'pending':
+        if txn['status'] != 'pending' and not state.get('test_llm'):
             return Command(goto=END, update={
                 'txn': txn, 'customer': customer,
                 'evaluation': await store.latest_evaluation(txn['txn_id']),
@@ -41,27 +49,42 @@ def build_evaluate_graph(*, store, write_with_audit, recommend):
         return Command(goto='run_checks', update={'txn': txn, 'customer': customer, 'policy': policy})
 
     async def run_checks(state: EvalState) -> dict:
-        checks = []
-        for criterion in state['policy']['criteria']:
-            if criterion['kind'] != 'hard':
-                continue
-            outcome = await CHECKS[criterion['check']](state['txn'], state['customer'], criterion['params'], store)
-            checks.append({
-                'criterion_id': criterion['id'], 'description': criterion['description'],
-                'kind': 'hard', 'source': 'rule', 'regulation_ref': criterion['regulation_ref'],
-                'precedents_used': [], 'adjustments_used': [], **outcome,
-            })
-        return {'checks': checks}
+        screening = await run_preliminary_screening(
+            txn=state['txn'], customer=state['customer'], policy=state['policy'],
+        )
+        return {'checks': screening['checks']}
 
     async def retrieve_context(state: EvalState) -> dict:
-        return {'precedents': [], 'adjustments': await store.active_adjustments(txn_type=state['txn']['type'])}
+        txn = state['txn']
+        # Check evidence can echo untrusted counterparty text; use criterion IDs only.
+        query = build_structured_query(
+            txn_type=txn['type'], amount=txn['amount'], customer_segment=state['customer']['segment'],
+            failed_criteria=[{'criterion_id': check['criterion_id']} for check in state['checks']
+                             if check['kind'] == 'hard' and check['result'] in ('no_pass', 'flag')],
+        )
+        related_policies = []
+        if not state.get('skip_policies', True):
+            related_policies = await retrieve_related_policies(
+                txn=txn, customer=state['customer'], policy=state['policy'], checks=state['checks'],
+            )
+        return {
+            'related_policies': related_policies,
+            'precedents': await store.search_memory(query=query, txn_type=txn['type'], kind='precedent', k=4),
+            'adjustments': await store.active_adjustments(txn_type=txn['type']),
+        }
 
-    async def recommend_node(state: EvalState) -> dict:
+    async def recommend_node(state: EvalState) -> Command[Literal['save_evaluation', '__end__']]:
+        if state.get('test_llm'):
+            await probe_model()
+            return Command(goto=END, update={'llm_call_succeeded': True})
         output = await recommend(
             txn=state['txn'], customer=state['customer'], policy=state['policy'], checks=state['checks'],
+            related_policies=state['related_policies'],
             precedents=state['precedents'], adjustments=state['adjustments'],
         )
-        return {'llm_output': RecommendOutput.model_validate(output).model_dump()}
+        return Command(goto='save_evaluation', update={
+            'llm_output': RecommendOutput.model_validate(output).model_dump(),
+        })
 
     async def save_evaluation(state: EvalState) -> dict:
         criteria = {c['id']: c for c in state['policy']['criteria'] if c['kind'] == 'judgment'}
@@ -79,6 +102,7 @@ def build_evaluate_graph(*, store, write_with_audit, recommend):
                 'criterion_id': check.criterion_id, 'description': criterion['description'],
                 'kind': 'judgment', 'source': 'llm', 'regulation_ref': criterion['regulation_ref'],
                 'result': check.result, 'evidence': check.evidence,
+                'explanation': check.evidence, 'facts': [],
                 'precedents_used': sorted(precedent_ids.intersection(check.precedents_used)),
                 'adjustments_used': sorted(allowed_adjustments.intersection(check.adjustments_used)),
             })
@@ -88,6 +112,8 @@ def build_evaluate_graph(*, store, write_with_audit, recommend):
         txn_id = state['txn_id']
         evaluation = {
             'eval_id': eval_id, 'txn_id': txn_id, 'actor': actor, 'policy_version': state['policy']['version'],
+            'transaction': state['txn'], 'policy_type': state['policy']['txn_type'],
+            'violated_criteria': failed, 'override': None,
             'checks': checks, 'recommendation': 'no_pass' if failed else 'pass', 'rationale': output.rationale,
             'precedents_used': sorted({ref for check in checks for ref in check['precedents_used']}),
             'adjustments_used': sorted({ref for check in checks for ref in check['adjustments_used']}),
@@ -109,6 +135,5 @@ def build_evaluate_graph(*, store, write_with_audit, recommend):
     graph.add_edge(START, 'load')
     graph.add_edge('run_checks', 'retrieve_context')
     graph.add_edge('retrieve_context', 'recommend')
-    graph.add_edge('recommend', 'save_evaluation')
     graph.add_edge('save_evaluation', END)
     return graph.compile()

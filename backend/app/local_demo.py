@@ -1,4 +1,4 @@
-"""Process-local dependencies for running the cheque slice without Atlas."""
+"""Process-local dependencies for running CSV policy checks without Atlas."""
 
 import asyncio
 import hashlib
@@ -10,7 +10,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from statistics import median
 
-from .models import Write, utc_now
+from .config import settings
+from .models import WorkflowError, Write, utc_now
+from .policy_checks import DEFAULT_POLICIES
+from .context_memory import _keyword_fallback_score
 
 
 def _load_transactions() -> tuple[dict[str, dict], dict[str, dict]]:
@@ -26,6 +29,8 @@ def _load_transactions() -> tuple[dict[str, dict], dict[str, dict]]:
                 raise ValueError(f'Duplicate transaction ID in {path.name}: {txn_id}')
             customer_id = row['source_account_id']
             txn_type = row['payment_method'].lower()
+            if txn_type == 'interac_e_transfer':
+                txn_type = 'interac'
             amount = float(row['amount_cad'])
             source_status = row['sender_account_status'].lower()
             customers[customer_id] = {
@@ -46,15 +51,15 @@ def _load_transactions() -> tuple[dict[str, dict], dict[str, dict]]:
                 'compliance_cleared': row['compliance_cleared'] == 'true',
                 'payment_reference': row['payment_reference'] or None,
                 'original_transaction_id': row['original_transaction_id'] or None,
-                'source_document_amount': float(row['source_document_amount_cad']),
+                'source_document_amount_cad': float(row['source_document_amount_cad']),
                 'return_reason_code': row['return_reason_code'] or None,
             }
             if txn_type == 'cheque':
                 details.update(
                     cheque_date=None, hold_days_applied=None,
                     deposit_channel={'BRANCH_CAPTURE': 'branch'}.get(row['cheque_capture_channel']),
-                    written_amount=float(row['cheque_written_amount_cad']),
-                    presented_amount=float(row['cheque_presented_amount_cad']),
+                    cheque_written_amount_cad=float(row['cheque_written_amount_cad']),
+                    cheque_presented_amount_cad=float(row['cheque_presented_amount_cad']),
                 )
             elif txn_type == 'wire':
                 details.update(
@@ -79,29 +84,6 @@ def _load_transactions() -> tuple[dict[str, dict], dict[str, dict]]:
     return transactions, customers
 
 
-def _cheque_policy() -> dict:
-    return {
-        'txn_type': 'cheque', 'version': 1, 'active': True,
-        'criteria': [
-            {'id': 'C-01', 'kind': 'hard', 'check': 'sanctions_screen',
-             'description': 'Counterparty is clear of the demo sanctions list',
-             'params': {'names': ['Example Blocked Company']}, 'regulation_ref': 'Demo sanctions policy'},
-            {'id': 'C-03', 'kind': 'hard', 'check': 'duplicate',
-             'description': 'No duplicate transaction', 'params': {}, 'regulation_ref': 'Bank policy'},
-            {'id': 'C-04', 'kind': 'judgment', 'check': None,
-             'description': 'Amount is consistent with the customer profile',
-             'params': {'ratio_hint': 3}, 'regulation_ref': 'FINTRAC suspicious-transaction indicators'},
-            {'id': 'Q-01', 'kind': 'hard', 'check': 'cheque_date_valid',
-             'description': 'Cheque is neither stale-dated nor post-dated',
-             'params': {}, 'regulation_ref': 'Bank practice'},
-        ],
-        'decision_rules': [
-            {'rule_id': 'D-01', 'role': 'analyst', 'max_amount': 50000, 'can_override_hard_fail': False},
-            {'rule_id': 'D-02', 'role': 'supervisor', 'max_amount': None, 'can_override_hard_fail': False},
-        ],
-    }
-
-
 class LocalDemo:
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
@@ -114,7 +96,7 @@ class LocalDemo:
             },
             'customers': customers,
             'transactions': transactions,
-            'policies': {'cheque': _cheque_policy()},
+            'policies': deepcopy(DEFAULT_POLICIES),
             'evaluations': {}, 'decisions': {}, 'memory': {},
         }
 
@@ -153,6 +135,12 @@ class LocalDemo:
         return [item for item in await self.list_documents('memory')
                 if item['active'] and item['kind'] == 'adjustment' and item['txn_type'] == txn_type]
 
+    async def search_memory(self, *, query: str, txn_type: str, kind: str, k: int = 4) -> list[dict]:
+        """Use the policy branch's keyword fallback on process-local memory."""
+        documents = [item for item in await self.list_documents('memory')
+                     if item['active'] and item['kind'] == kind and item['txn_type'] == txn_type]
+        return _keyword_fallback_score(documents, query, k, min_score=0.68)
+
     async def check_gate(self, *, principal: dict, txn: dict, evaluation: dict, verdict: str) -> dict:
         policy = await self.get('policies', txn['type'])
         rule = next((item for item in policy['decision_rules'] if item['role'] == principal['role']), None)
@@ -185,6 +173,21 @@ class LocalDemo:
         }
         canonical = json.dumps(entry, sort_keys=True, separators=(',', ':'))
         entry['hash'] = hashlib.sha256((prev_hash + canonical).encode()).hexdigest()
+        if event == 'evaluation.created' and settings.mongodb_configured:
+            from pymongo.errors import PyMongoError
+
+            from .db import audit
+
+            evaluation = changes['evaluations'][ref['id']]
+            try:
+                await audit.write_with_audit(
+                    actor=actor, event=event, txn_id=txn_id, ref=ref, detail=detail,
+                    writes=[audit.Write('evaluations', 'insert', document=evaluation)],
+                )
+            except PyMongoError as exc:
+                raise WorkflowError(
+                    503, 'evaluation_save_failed', 'Could not save the evaluation to MongoDB.',
+                ) from exc
         self._collections.update(changes)
         self.audit_log.append(deepcopy(entry))
         return entry

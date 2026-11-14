@@ -1,49 +1,44 @@
-"""Deterministic model stand-in for the local payroll workflow."""
+"""Model adapter for recommendations and local feedback-learning stand-in."""
 
-from calendar import monthrange
-from datetime import date
-
-from .models import JudgmentCheck, LearnOutput, RecommendOutput
+from .models import LearnOutput, RecommendOutput, WorkflowError
+from .recommendation import build_recommend_messages
 
 PAYROLL_COMMENT = "Payroll customers spike at month-end, that's normal."
 PAYROLL_CONDITION = 'customer segment is payroll and date is within 3 days of month-end'
 
 
+async def probe_model() -> None:
+    from .config import settings
+
+    try:
+        from .agent.llm import get_llm
+
+        await get_llm().ainvoke('Reply with OK. This is a connectivity test.')
+    except Exception as exc:
+        raise WorkflowError(
+            502, 'llm_call_failed',
+            f'Could not call {settings.llm_model} ({type(exc).__name__}). '
+            'Check the model dependencies, credentials and provider connection.',
+        ) from exc
+
+
 async def recommend(
     *, txn: dict, customer: dict, policy: dict, checks: list[dict],
-    precedents: list[dict], adjustments: list[dict],
+    related_policies: list[dict], precedents: list[dict], adjustments: list[dict],
 ) -> RecommendOutput:
-    criterion = next(item for item in policy['criteria'] if item['id'] == 'C-04')
-    typical = customer['typical_amount']
-    ratio = txn['amount'] / typical if typical else None
-    adjustment = next((item for item in adjustments if item['scope'] == {
-        'criterion_id': 'C-04', 'condition': PAYROLL_CONDITION,
-    }), None)
-    valid_date = any(check['criterion_id'] == 'Q-01' and check['result'] == 'pass' for check in checks)
-    if adjustment and valid_date and customer['segment'] == 'payroll':
-        cheque_date = date.fromisoformat(txn['type_specific']['cheque_date'])
-        days_to_month_end = monthrange(cheque_date.year, cheque_date.month)[1] - cheque_date.day
-        if days_to_month_end > 3:
-            adjustment = None
-    else:
-        adjustment = None
+    from .agent.llm import get_llm
 
-    if adjustment:
-        evidence = f"Month-end payroll spike covered by guidance from {adjustment['author_id']}."
-        judgment = JudgmentCheck(
-            criterion_id='C-04', result='pass', evidence=evidence,
-            adjustments_used=[adjustment['memory_id']],
-        )
-    elif ratio is None:
-        evidence = 'No posted payment history is available to establish a typical amount.'
-        judgment = JudgmentCheck(criterion_id='C-04', evidence=evidence, result='no_pass')
-    else:
-        evidence = f'Cheque amount is {ratio:.1f} times the typical amount.'
-        judgment = JudgmentCheck(
-            criterion_id='C-04', evidence=evidence,
-            result='no_pass' if ratio > criterion['params']['ratio_hint'] else 'pass',
-        )
-    return RecommendOutput(judgment_checks=[judgment], rationale=evidence)
+    messages = build_recommend_messages(
+        txn=txn, customer=customer, policy=policy, checks=checks,
+        related_policies=related_policies, precedents=precedents, adjustments=adjustments,
+    )
+    try:
+        output = await get_llm().with_structured_output(RecommendOutput).ainvoke(messages)
+        return RecommendOutput.model_validate(output)
+    except Exception as exc:
+        raise WorkflowError(
+            502, 'llm_call_failed', f'Recommendation model call failed ({type(exc).__name__}).',
+        ) from exc
 
 
 async def learn(*, decision: dict, evaluation: dict, policy: dict) -> LearnOutput:
