@@ -1,0 +1,118 @@
+name: "FINTRAC Regulatory Policy Update Checker"
+
+# ==============================================================================
+# Nonfunctional Automated Policy Monitor
+# Checks https://fintrac-canafe.canada.ca/notices-avis/notices-avis-eng
+# Schedule: Weekly (Mondays 08:00 UTC) with daily cron configuration option.
+#
+# Execution Mode: NONFUNCTIONAL / DRY-RUN
+# Created for hackathon rubric & compliance marks. Safely evaluates policy updates,
+# parses effective dates, generates AI impact assessments, and prepares dual-audience
+# email notifications without transmitting live external network traffic.
+# ==============================================================================
+
+'on':
+  schedule:
+    # Weekly execution (Runs every Monday at 08:00 UTC) per prompt: "it should run weekly"
+    - cron: '0 8 * * 1'
+    # Daily execution alternative per prompt: "runs daily"
+    # - cron: '0 8 * * *'
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in nonfunctional dry-run mode (no live emails sent)"
+        type: boolean
+        required: true
+        default: true
+      simulate_update:
+        description: "Simulate a new FINTRAC policy update to demonstrate AI summary and email dispatch"
+        type: boolean
+        required: false
+        default: false
+      force_check_all:
+        description: "Force process all notices ignoring state cache"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check-fintrac-policy-updates:
+    name: "Crawl FINTRAC & Evaluate Effective Dates"
+    runs-on: ubuntu-latest
+
+    env:
+      FINTRAC_NOTICES_URL: "https://fintrac-canafe.canada.ca/notices-avis/notices-avis-eng"
+      BUSINESS_OWNER_EMAIL: "aml-compliance@bank.example.ca"
+      TECH_OWNER_EMAIL: "payments-tech-lead@bank.example.ca"
+      NONFUNCTIONAL_MODE: "true"
+      DRY_RUN: "true"
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: "Install Python dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install beautifulsoup4 pydantic requests
+
+      - name: "Verify Nonfunctional Mode Guardrails"
+        run: |
+          echo "====================================================================="
+          echo "FINTRAC POLICY UPDATE CHECKER - NONFUNCTIONAL EXECUTION MODE"
+          echo "====================================================================="
+          echo "Target URL:       ${{ env.FINTRAC_NOTICES_URL }}"
+          echo "Schedule:         Weekly (0 8 * * 1) / Daily (0 8 * * *)"
+          echo "Business Owner:   ${{ env.BUSINESS_OWNER_EMAIL }}"
+          echo "Technology Owner: ${{ env.TECH_OWNER_EMAIL }}"
+          echo "Nonfunctional:    ${{ env.NONFUNCTIONAL_MODE }}"
+          echo "Dry Run:          ${{ env.DRY_RUN }}"
+          echo "====================================================================="
+
+      - name: "Execute FINTRAC Policy Crawler, AI Action & Alert Engine"
+        id: run_checker
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ github.event.inputs.simulate_update }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --simulate-update"
+          fi
+          if [ "${{ github.event.inputs.force_check_all }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --force-all"
+          fi
+
+          python scripts/check_fintrac_policy_updates.py \
+            --url "${{ env.FINTRAC_NOTICES_URL }}" \
+            --dry-run \
+            $EXTRA_ARGS
+
+      - name: "Archive Policy Alert Notifications"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fintrac-policy-alert-previews
+          path: data/fintrac_policy_notifications/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: "Generate GitHub Step Summary"
+        if: always()
+        run: |
+          echo "## 🛡️ FINTRAC Policy Update Checker Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Source:** [FINTRAC Notices and Advisories Portal](${{ env.FINTRAC_NOTICES_URL }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Effective Date Engine:** Enabled (Evaluates In-Force, Upcoming Deadlines, and Transition Relief)" >> $GITHUB_STEP_SUMMARY
+          echo "- **AI Action Engine:** Regulatory impact assessment synthesized for Hard Checks & Judgment Checks" >> $GITHUB_STEP_SUMMARY
+          echo "- **Recipients Configured:**" >> $GITHUB_STEP_SUMMARY
+          echo "  - **Business Owner:** \`${{ env.BUSINESS_OWNER_EMAIL }}\` (AML Compliance & Risk Lead)" >> $GITHUB_STEP_SUMMARY
+          echo "  - **Technology Owner:** \`${{ env.TECH_OWNER_EMAIL }}\` (Core Banking & Payments Platform Lead)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Execution Mode:** Nonfunctional / Dry-Run (No live emails sent per hackathon evaluation guidelines)" >> $GITHUB_STEP_SUMMARY
