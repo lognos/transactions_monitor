@@ -95,6 +95,11 @@ jobs:
             --dry-run \
             $EXTRA_ARGS
 
+      - name: "Execute Automated Policy Ingestion Loop & CSV Synchronization"
+        id: run_ingestion_loop
+        run: |
+          python scripts/policy_ingestion_loop.py --dry-run
+
       - name: "Archive Policy Alert Notifications"
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,13 +109,25 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: "Archive Synchronized Policy Catalog CSV"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fintrac-policy-monitoring-catalog-csv
+          path: data/fintrac_policy_monitoring_catalog.csv
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: "Generate GitHub Step Summary"
         if: always()
         run: |
-          echo "## 🛡️ FINTRAC Policy Update Checker Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🛡️ FINTRAC Policy Update Checker & Ingestion Loop Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Target Source:** [FINTRAC Notices and Advisories Portal](${{ env.FINTRAC_NOTICES_URL }})" >> $GITHUB_STEP_SUMMARY
-          echo "- **Effective Date Engine:** Enabled (Evaluates In-Force, Upcoming Deadlines, and Transition Relief)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Sources Monitored:**" >> $GITHUB_STEP_SUMMARY
+          echo "  - [FINTRAC Guidance Directives](https://fintrac-canafe.canada.ca/guidance-directives/guidance-directives-eng)" >> $GITHUB_STEP_SUMMARY
+          echo "  - [FINTRAC Notices & Advisories](${{ env.FINTRAC_NOTICES_URL }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **CSV Monitoring Catalog:** \`data/fintrac_policy_monitoring_catalog.csv\` (172+ tracked policies with effective & expiry dates)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Vector Database Ingestion:** Synced to Atlas Vector Search collection \`memory\` (\`kind='policy'\`, active=true, expired purged/deactivated)" >> $GITHUB_STEP_SUMMARY
           echo "- **AI Action Engine:** Regulatory impact assessment synthesized for Hard Checks & Judgment Checks" >> $GITHUB_STEP_SUMMARY
           echo "- **Recipients Configured:**" >> $GITHUB_STEP_SUMMARY
           echo "  - **Business Owner:** \`${{ env.BUSINESS_OWNER_EMAIL }}\` (AML Compliance & Risk Lead)" >> $GITHUB_STEP_SUMMARY

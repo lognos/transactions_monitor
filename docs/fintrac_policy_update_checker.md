@@ -134,3 +134,70 @@ View the generated HTML email preview:
 open data/fintrac_policy_notifications/*.html
 ```
 Or inspect the latest JSON metadata payload in `data/fintrac_policy_notifications/`.
+
+---
+
+## 8. Automatic Policy Ingestion Loop & Vector DB Synchronization
+
+Located at: `scripts/policy_ingestion_loop.py`
+
+In addition to notification alerting, the compliance infrastructure implements an **automatic policy ingestion loop** that continuously crawls trusted government sources, synchronizes a comprehensive CSV policy monitoring catalog, ingests active policies into the vector database, and automatically purges or deactivates expired policies.
+
+### A. Trusted Sources Monitored
+1. **FINTRAC Guidance Directives Portal:**  
+   `https://fintrac-canafe.canada.ca/guidance-directives/guidance-directives-eng`  
+   (KYC/CDD verification methods, PEPs, risk-based approach, suspicious transaction indicators, sanctions evasion guidance)
+2. **FINTRAC Notices and Advisories Portal:**  
+   `https://fintrac-canafe.canada.ca/notices-avis/notices-avis-eng`  
+   (Ministerial directives, FATF high-risk jurisdictions, reporting system updates)
+3. **Master Canadian Banking Regulation Baseline:**  
+   `data/master_canadian_policy_catalog.json`  
+   (Statutory baseline including PCMLTFA, Payments Canada Lynx/ACSS rules, Interac regulations, and OSFI E-23 AI governance)
+
+### B. CSV Policy Monitoring Catalog
+- **File:** `data/fintrac_policy_monitoring_catalog.csv` (172+ entries tracked)
+- **Standardized Schema:**
+  | Field Name | Type | Description |
+  | --- | --- | --- |
+  | `policy_id` | String | Unique standard identifier (`FINTRAC-STR`, `FINTRAC-TRAVEL`, `FINTRAC-NT-...`) |
+  | `title` | String | Official directive or notice title |
+  | `category` | String | Regulatory domain (e.g. `SUSPICIOUS_TRANSACTION`, `SANCTIONS_EVASION`, `KYC_CDD`) |
+  | `regulator` | String | `FINTRAC`, `OSFI`, `PAYMENTS_CANADA`, `FINANCE_CANADA` |
+  | `statutory_authority`| String | Legislative citation (e.g. `PCMLTFA s. 7`, `PCMLTFA Regulations s. 126`, `SEMA`) |
+  | `source_url` | String | Trusted link to official government portal |
+  | `publication_date` | Date (ISO) | Date published by regulator |
+  | `effective_date` | Date (ISO) | In-force compliance date |
+  | `expiry_date` | Date (ISO) | Sunset date, withdrawal date, or empty if ongoing |
+  | `status` | Enum | `ACTIVE`, `UPCOMING`, `EXPIRED`, `SUPERSEDED` |
+  | `impacted_rails` | List | Semicolon-delimited payment rails (`WIRE;EFT;INTERAC;CASH;CRYPTO;CHEQUE`) |
+  | `enforcement_type` | Enum | `MANDATORY_HARD_CHECK`, `JUDGMENT_INDICATOR`, `RECORD_KEEPING`, `REPORTING_OBLIGATION` |
+  | `core_mandate` | String | Executive compliance requirement statement |
+  | `content_hash` | String | SHA-256 hash for content versioning and diff detection |
+  | `vector_doc_id` | String | Reference ID in MongoDB Atlas vector store (`VEC-...`) |
+  | `last_crawled_at` | Timestamp | ISO 8601 UTC timestamp of latest check |
+
+### C. Vector Database Ingestion & Expired Policy Purging
+- **Collection:** `db.memory` with `kind: "policy"` and Atlas Vector Search index `memory_text_idx` (per `contracts.md §3.7` and `backend/app/memory.py`).
+- **Active Policy Ingestion:**
+  - Active policies (`status == 'ACTIVE'` or `'UPCOMING'`) are upserted into the vector store with structured metadata scopes and searchable text embeddings.
+- **Expired Policy Lifecycle Management:**
+  - The loop checks all policies where `expiry_date < current_date` or `status == 'EXPIRED'` (e.g. historical temporary COVID support withdrawn on 2022-03-31, or expired transition notices).
+  - **Soft Deactivation (Default):** Sets `active: False`, `expired: True`, and `expired_at: <timestamp>`. Because the LangGraph agent's vector search filter requires `{"active": True}`, expired policies are instantly excluded from evaluation prompts and reviewer question answering.
+  - **Hard Purge (`--purge-expired`):** Physically removes expired policy documents from the database while retaining the CSV audit trail.
+
+### D. CLI Verification Commands
+
+```bash
+# 1. Run ingestion loop in dry-run mode (crawls trusted sites, updates CSV, previews vector changes)
+python scripts/policy_ingestion_loop.py --dry-run
+
+# 2. Synchronize directly to MongoDB Atlas vector database (ingests active, deactivates expired)
+python scripts/policy_ingestion_loop.py --sync-db
+
+# 3. Simulate discovering a new policy directive
+python scripts/policy_ingestion_loop.py --dry-run --simulate-new
+
+# 4. Simulate policy expiry and test vector purge
+python scripts/policy_ingestion_loop.py --sync-db --purge-expired
+```
+
