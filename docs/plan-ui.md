@@ -10,7 +10,9 @@ One screen, split in two, that makes five scenarios readable from the back of a 
 - **Left: chat** with the agent.
 - **Right: artifacts**, the list of transactions with the agent's recommendation for each.
 
-Clicking a transaction opens a dialog with its checklist. Clicking a pass / no-pass badge in that dialog opens a second dialog with the references behind that check.
+Clicking a transaction opens its details in a panel under the list, in the same right-hand pane: summary, checklist, rationale and decision buttons. The list stays visible above it, in compact one-line rows. Clicking a pass / no-pass badge opens a dialog that explains why the check got that result (`explanation` and `facts`, contracts §3.5) and shows the policy, learned adjustments and previous decisions behind it.
+
+Note: the layout sketch and the "Checks dialog" rows below predate this change. Read "checks dialog" as the details panel.
 
 Done when all five scenarios in [plan-scenarios.md](plan-scenarios.md) can be clicked through without touching anything but the page.
 

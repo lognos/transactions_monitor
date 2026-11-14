@@ -53,7 +53,8 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/principals")
-async def list_principals(_: dict = Principal) -> dict[str, Any]:
+async def list_principals() -> dict[str, Any]:
+    """No identity needed: this fills the login screen."""
     principals = await get_db().principals.find({"type": "human"}).to_list()
     return {"principals": [{**public_data(p), "_id": p["_id"]} for p in principals]}
 

@@ -94,7 +94,12 @@ async def get_check_references(eval_id: str, criterion_id: str) -> dict[str, Any
             destination.append(item)
 
     return {
-        "check": {key: check[key] for key in ("criterion_id", "result", "source", "evidence")},
+        "check": {
+            **{key: check[key] for key in ("criterion_id", "result", "source", "evidence")},
+            # Older evaluations may predate these fields.
+            "explanation": check.get("explanation") or check["evidence"],
+            "facts": check.get("facts", []),
+        },
         "policy": {
             "txn_type": policy["txn_type"],
             "version": policy["version"],

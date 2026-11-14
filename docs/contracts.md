@@ -110,7 +110,10 @@ Index: unique on `{txn_type: 1, version: 1}`.
   "checks": [
     { "criterion_id": "W-01", "description": "Originator and beneficiary information complete",
       "kind": "hard", "source": "rule", "result": "no_pass",
-      "evidence": "counterparty.address is missing", "regulation_ref": "FINTRAC travel rule",
+      "evidence": "counterparty.address is missing",
+      "explanation": "The travel rule requires the beneficiary's name, address and account number to travel with a wire. The address is missing, so the wire cannot proceed until it is corrected. This is a mandatory rule and no reviewer can override it.",
+      "facts": [ { "label": "Beneficiary name", "value": "Northwind Trading" }, { "label": "Beneficiary address", "value": "Missing" } ],
+      "regulation_ref": "FINTRAC travel rule",
       "precedents_used": [], "adjustments_used": [] }
   ],
   "recommendation": "no_pass",
@@ -128,6 +131,7 @@ Index: unique on `{txn_type: 1, version: 1}`.
 ```
 - `status`: `awaiting_review`, `decided`, or `superseded` (replaced by a newer evaluation of the same transaction after a refresh).
 - Top-level `precedents_used` and `adjustments_used` are the union of the per-check lists.
+- Each check carries three levels of detail. `evidence` is one line for the checklist row. `explanation` is two to four sentences for the references dialog saying why the check passed, failed or was flagged, in words a reviewer can repeat to an auditor. `facts` lists the values that were examined (`label`, `value` as display strings). Hard checks produce all three in code; judgment checks get `evidence` and `explanation` from the LLM and `facts` from the node.
 
 Index: unique on `eval_id`; `{txn_id: 1}`.
 
@@ -202,7 +206,7 @@ Base URL `http://localhost:8010` (port 8000 is taken on some of our machines). J
 
 | # | Method and path | Purpose |
 | --- | --- | --- |
-| 1 | `GET /principals` | Fill the "acting as" dropdown |
+| 1 | `GET /principals` | Fill the login screen. The only call that needs no `X-Principal-Id` |
 | 2 | `GET /transactions?status=pending` | Transactions list, each with the agent's latest recommendation |
 | 3 | `POST /transactions/{txn_id}/evaluate` | Run the Evaluate graph for one transaction (`?refresh=true` to redo it) |
 | 4 | `GET /evaluations/{eval_id}` | Checks dialog |
@@ -278,7 +282,9 @@ Evaluates every `pending` transaction. With `"refresh": true` it also re-evaluat
 **10 `GET /evaluations/{eval_id}/checks/{criterion_id}/references`** → `200`
 ```json
 {
-  "check": { "criterion_id": "C-04", "result": "pass", "source": "llm", "evidence": "…" },
+  "check": { "criterion_id": "C-04", "result": "pass", "source": "llm", "evidence": "…",
+    "explanation": "The amount is 3.4 times this customer's typical payment, which would normally fail. Ana's guidance says payroll customers spike at month-end; this is a payroll customer and the cheque is dated at month-end, so the guidance applies and the check passes.",
+    "facts": [ { "label": "Amount", "value": "CAD 9,400" }, { "label": "Typical amount", "value": "CAD 2,800" }, { "label": "Ratio", "value": "3.4x" } ] },
   "policy": { "txn_type": "cheque", "version": 1, "criterion_id": "C-04",
     "description": "Amount consistent with the customer's usual profile", "kind": "judgment",
     "regulation_ref": "FINTRAC suspicious-transaction indicators", "params": { "ratio_hint": 3 } },
@@ -339,7 +345,8 @@ Deny, in this order:
 ### 5.3 Deterministic checks
 ```python
 CheckFn = Callable[[dict, dict, dict, Db], Awaitable[CheckOutcome]]   # (txn, customer, params, db)
-# CheckOutcome: {"result": "pass" | "no_pass" | "flag", "evidence": str}
+# CheckOutcome: {"result": "pass" | "no_pass" | "flag", "evidence": str,
+#                "explanation": str, "facts": [{"label": str, "value": str}]}
 CHECKS: dict[str, CheckFn]
 ```
 
@@ -389,6 +396,7 @@ Pydantic models passed to `with_structured_output`. The LLM never writes to the 
 {
   "judgment_checks": [
     { "criterion_id": "C-04", "result": "no_pass", "evidence": "Amount is 3.6x the typical amount and the payee is new.",
+      "explanation": "Two to four sentences: what was compared, which precedent or adjustment decided it, and what would change the result.",
       "precedents_used": ["MEM-11aa22bb"], "adjustments_used": [] }
   ],
   "rationale": "One or two sentences for the reviewer."

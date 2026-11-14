@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, LoaderCircle, MessageSquare, Send, X } from "lucide-react";
+import { Bot, LoaderCircle, Send, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Badge, Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -55,21 +55,9 @@ export function ChatPanel({
   }
 
   return (
-    <section id="chat-pane" aria-labelledby="chat-heading" className="flex h-full min-h-0 flex-col bg-surface-1/40">
-      <div className="flex items-center gap-3 border-b border-border-subtle px-5 py-4">
-        <MessageSquare className="size-5 text-accent-fg" aria-hidden="true" />
-        <h2 id="chat-heading" className="text-sm font-semibold tracking-wider uppercase">Chat</h2>
-        <span className="ml-auto text-sm text-text-subtle">Validation agent</span>
-      </div>
+    <section id="chat-pane" aria-label="Chat with the validation agent" className="flex h-full min-h-0 flex-col bg-surface-1/40">
 
       <div role="log" aria-label="Conversation with validation agent" aria-live="polite" aria-relevant="additions text" className="min-h-48 flex-1 space-y-5 overflow-y-auto p-5">
-        {messages.length === 0 && (
-          <div className="my-8 space-y-3 rounded-xl border border-border-subtle bg-surface-1 p-5">
-            <Bot className="size-7 text-accent-fg" aria-hidden="true" />
-            <p className="text-lg font-medium">Follow the reasoning.</p>
-            <p className="text-base text-text-muted">Ask about a policy, or open a transaction to discuss its checks and the decisions behind them.</p>
-          </div>
-        )}
         {messages.map((message) => (
           <article key={message.id} className={cn("space-y-2 rounded-xl border p-4", message.role === "user" ? "ml-6 border-border-subtle bg-surface-2" : "mr-3 border-accent/30 bg-accent-subtle")}>
             <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -98,14 +86,14 @@ export function ChatPanel({
       </div>
 
       <div className="space-y-3 border-t border-border-subtle bg-surface-1 p-4">
-        {focus ? (
+        {focus && (
           <div className="flex items-center gap-2 text-sm">
             <span className="text-text-muted">About:</span>
             <button type="button" onClick={onClearFocus} aria-label={`Clear focus on ${focus.txnId}`} className="inline-flex items-center gap-2 rounded-md border border-status-info-border bg-status-info-bg px-2.5 py-1 text-status-info-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus">
               <span className="font-mono">{focus.txnId}</span><X className="size-4" aria-hidden="true" />
             </button>
           </div>
-        ) : <p className="text-sm text-text-muted">General conversation · policies and memory</p>}
+        )}
         {error && <p role="alert" className="rounded-md border border-status-negative-border bg-status-negative-bg px-3 py-2 text-sm text-status-negative-fg">{error}</p>}
         <form onSubmit={send} className="flex items-end gap-2">
           <label htmlFor="chat-question" className="sr-only">Ask the validation agent</label>
@@ -119,7 +107,6 @@ export function ChatPanel({
             {busy ? <LoaderCircle className="size-5 animate-spin" aria-hidden="true" /> : <Send className="size-5" aria-hidden="true" />}
           </Button>
         </form>
-        <p className="text-xs text-text-subtle">Enter to send · Shift + Enter for a new line</p>
       </div>
     </section>
   );

@@ -51,6 +51,11 @@ export interface Customer {
   typical_amount: number;
 }
 
+export interface CheckFact {
+  label: string;
+  value: string;
+}
+
 export interface Check {
   criterion_id: string;
   description: string;
@@ -58,6 +63,8 @@ export interface Check {
   source: "rule" | "llm";
   result: CheckResult;
   evidence: string;
+  explanation?: string;
+  facts?: CheckFact[];
   regulation_ref?: string;
   precedents_used: string[];
   adjustments_used: string[];
@@ -172,7 +179,7 @@ export interface ChatResponse {
 }
 
 export interface ReferencesResponse {
-  check: Pick<Check, "criterion_id" | "result" | "source" | "evidence">;
+  check: Pick<Check, "criterion_id" | "result" | "source" | "evidence"> & { explanation: string; facts: CheckFact[] };
   policy: {
     txn_type: TxnType;
     version: number;

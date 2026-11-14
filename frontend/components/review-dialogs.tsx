@@ -1,12 +1,13 @@
 "use client";
 
 import { useId, useState } from "react";
-import { BookOpen, LoaderCircle, Sparkles } from "lucide-react";
-import { Badge, Button, Dialog, Select, type BadgeTone } from "@/components/ui";
+import { BookOpen, LoaderCircle, Sparkles, X } from "lucide-react";
+import { Badge, Button, Dialog, type BadgeTone } from "@/components/ui";
 import type { CheckResult, Evaluation, Principal, ReferencesResponse, Verdict } from "@/lib/types";
 
 const resultTone: Record<CheckResult, BadgeTone> = { pass: "positive", no_pass: "negative", flag: "attention" };
 const resultText: Record<CheckResult, string> = { pass: "PASS", no_pass: "NO-PASS", flag: "FLAG" };
+const whyText: Record<CheckResult, string> = { pass: "Why it passed", no_pass: "Why it did not pass", flag: "Why it was flagged" };
 const verdictText: Record<Verdict, string> = {
   validated: "Validated",
   validated_with_comments: "Validated with comments",
@@ -27,51 +28,56 @@ function ErrorBanner({ message }: { message: string }) {
   return <p role="alert" className="rounded-lg border border-status-negative-border bg-status-negative-bg p-4 text-status-negative-fg">{message}</p>;
 }
 
-export interface ChecksDialogProps {
-  open: boolean;
+export interface TransactionDetailsProps {
   evaluation?: Evaluation;
   loading: boolean;
   error?: string | null;
   busy: boolean;
   decisionError?: string | null;
   principals: Principal[];
-  principalId: string;
-  onPrincipalChange: (id: string) => void;
   onClose: () => void;
   onReferences: (criterionId: string) => void;
   onDecide: (verdict: Verdict, comments?: string) => void;
 }
 
-export function ChecksDialog(props: ChecksDialogProps) {
-  const { open, evaluation, loading, error, onClose } = props;
+// Inline panel shown under the transactions list in the artifacts pane.
+export function TransactionDetails(props: TransactionDetailsProps) {
+  const { evaluation, loading, error, onClose } = props;
   return (
-    <Dialog open={open} onClose={onClose} title={evaluation ? `${evaluation.txn_id} · Transaction checks` : "Transaction checks"} description="Review the evidence, open a result for its references, then record your decision.">
-      {loading && !evaluation && <Loading>Loading transaction checks…</Loading>}
-      {error && <ErrorBanner message={error} />}
-      {open && evaluation && <CheckDetails key={evaluation.eval_id} {...props} evaluation={evaluation} />}
-    </Dialog>
+    <section aria-label="Transaction details" className="flex min-h-0 flex-1 flex-col border-t-2 border-border-default bg-surface-1">
+      <header className="flex items-center justify-between gap-3 border-b border-border-subtle px-5 py-2">
+        <h3 className="text-sm font-medium">{evaluation && <span className="font-mono">{evaluation.txn_id} · </span>}Transaction details</h3>
+        <button type="button" aria-label="Close transaction details" onClick={onClose} className="rounded p-1 text-text-muted hover:bg-surface-3 hover:text-text-default focus-visible:outline-2 focus-visible:outline-border-focus">
+          <X className="size-4" aria-hidden="true" />
+        </button>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto p-5">
+        {loading && !evaluation && <Loading>Loading transaction checks…</Loading>}
+        {error && <ErrorBanner message={error} />}
+        {evaluation && <CheckDetails key={evaluation.eval_id} {...props} evaluation={evaluation} />}
+      </div>
+    </section>
   );
 }
 
-function CheckDetails({ evaluation, busy, decisionError, principals, principalId, onPrincipalChange, onReferences, onDecide }: ChecksDialogProps & { evaluation: Evaluation }) {
+function CheckDetails({ evaluation, busy, decisionError, principals, onReferences, onDecide }: TransactionDetailsProps & { evaluation: Evaluation }) {
   const [commentAction, setCommentAction] = useState<"validated_with_comments" | "rejected" | null>(null);
   const [comments, setComments] = useState("");
   const commentsId = useId();
-  const principalSelectId = useId();
   const { transaction, customer, decision } = evaluation;
   const canDecide = evaluation.status === "awaiting_review" && !decision;
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-lg border border-border-subtle bg-surface-2/50 p-4" aria-label="Transaction summary">
+    <div className="space-y-4">
+      <section className="rounded-lg border border-border-subtle bg-surface-2/50 p-3" aria-label="Transaction summary">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-xl font-medium"><span className="capitalize">{transaction.type}</span> · {transaction.currency} {transaction.amount.toLocaleString("en-CA")}</div>
-          <Badge tone={resultTone[evaluation.recommendation]} className="px-3 py-1 text-base">Agent: {resultText[evaluation.recommendation]}</Badge>
+          <div className="text-base font-medium"><span className="capitalize">{transaction.type}</span> · {transaction.currency} {transaction.amount.toLocaleString("en-CA")}</div>
+          <Badge tone={resultTone[evaluation.recommendation]} className="px-2.5 py-0.5 text-sm">Agent: {resultText[evaluation.recommendation]}</Badge>
         </div>
-        <dl className="mt-3 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-          <div><dt className="text-text-subtle">Customer</dt><dd className="text-base">{customer.name}</dd></div>
-          <div><dt className="text-text-subtle">Counterparty</dt><dd className="text-base">{transaction.counterparty.name}</dd></div>
-          <div className="sm:col-span-2"><dt className="text-text-subtle">Transaction memo</dt><dd className="break-words text-base">{transaction.memo || "No memo supplied"}</dd></div>
+        <dl className="mt-2 grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2 2xl:grid-cols-4">
+          <div><dt className="text-text-subtle">Customer</dt><dd>{customer.name}</dd></div>
+          <div><dt className="text-text-subtle">Counterparty</dt><dd>{transaction.counterparty.name}</dd></div>
+          <div className="sm:col-span-2"><dt className="text-text-subtle">Transaction memo</dt><dd className="break-words">{transaction.memo || "No memo supplied"}</dd></div>
           <div><dt className="text-text-subtle">Status</dt><dd className="capitalize">{transaction.status.replaceAll("_", " ")}</dd></div>
           <div><dt className="text-text-subtle">Policy</dt><dd className="capitalize">{transaction.type} · version {evaluation.policy_version}</dd></div>
         </dl>
@@ -80,10 +86,10 @@ function CheckDetails({ evaluation, busy, decisionError, principals, principalId
       <section aria-label="Checks">
         <ul className="divide-y divide-border-subtle rounded-lg border border-border-subtle">
           {evaluation.checks.map((check) => (
-            <li key={check.criterion_id} className="p-4">
+            <li key={check.criterion_id} className="px-4 py-2.5">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="font-mono text-sm text-accent-fg">{check.criterion_id}</span>
-                <h3 className="min-w-40 flex-1 font-medium">{check.description}</h3>
+                <h3 className="min-w-40 flex-1 text-sm font-medium">{check.description}</h3>
                 <Badge tone={check.source === "rule" ? "neutral" : "info"} className="text-sm">{check.source === "rule" ? "rule" : "LLM"}</Badge>
                 <button
                   type="button"
@@ -95,7 +101,7 @@ function CheckDetails({ evaluation, busy, decisionError, principals, principalId
                 </button>
                 {check.adjustments_used.length > 0 && <Badge tone="positive" icon={Sparkles} className="text-sm">learned</Badge>}
               </div>
-              <p className="mt-2 break-words text-base text-text-muted">{check.evidence}</p>
+              <p className="mt-0.5 break-words text-sm text-text-muted">{check.evidence}</p>
             </li>
           ))}
         </ul>
@@ -116,12 +122,6 @@ function CheckDetails({ evaluation, busy, decisionError, principals, principalId
       {decisionError && <ErrorBanner message={decisionError} />}
 
       {canDecide && <section className="space-y-4 border-t border-border-subtle pt-5" aria-label="Reviewer decision">
-        <label htmlFor={principalSelectId} className="flex flex-wrap items-center gap-3 text-sm text-text-muted">
-          Acting as
-          <Select id={principalSelectId} value={principalId} disabled={busy} onChange={(event) => onPrincipalChange(event.target.value)}>
-            {principals.map((person) => <option key={person._id} value={person._id}>{person.name} · {person.role}</option>)}
-          </Select>
-        </label>
         <div className="flex flex-wrap gap-3">
           <Button disabled={busy} onClick={() => onDecide("validated")} className="h-10 text-base">Validate</Button>
           <Button variant="ghost" disabled={busy} aria-expanded={commentAction === "validated_with_comments"} onClick={() => setCommentAction("validated_with_comments")} className="h-10 text-base">Validate with comments</Button>
@@ -154,7 +154,7 @@ export interface ReferencesDialogProps {
 
 export function ReferencesDialog({ open, loading, error, references, onClose }: ReferencesDialogProps) {
   return (
-    <Dialog open={open} onClose={onClose} className="max-w-3xl" title={references ? `${references.check.criterion_id} · References` : "Check references"} description="The policy and context used by this check.">
+    <Dialog open={open} onClose={onClose} className="max-w-3xl" title={references ? `${references.check.criterion_id} · References` : "Check references"} description="Why this check got its result, and the policy and decisions behind it.">
       {loading && <Loading>Loading references…</Loading>}
       {error && <ErrorBanner message={error} />}
       {references && <div className="space-y-6">
@@ -163,7 +163,16 @@ export function ReferencesDialog({ open, loading, error, references, onClose }: 
             <Badge tone={resultTone[references.check.result]} className="px-3 py-1 text-base">{resultText[references.check.result]}</Badge>
             <Badge tone={references.check.source === "llm" ? "info" : "neutral"} className="text-sm">{references.check.source === "llm" ? "LLM" : "rule"}</Badge>
           </div>
-          <p className="text-text-muted">{references.check.evidence}</p>
+          <h3 className="text-lg font-medium">{whyText[references.check.result]}</h3>
+          <p className="mt-1 text-base leading-relaxed">{references.check.explanation || references.check.evidence}</p>
+          {references.check.facts.length > 0 && <>
+            <h4 className="mt-4 text-xs font-medium tracking-wider text-text-subtle uppercase">What was checked</h4>
+            <dl className="mt-2 grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-6 gap-y-1.5 text-sm">
+              {references.check.facts.map((fact) => <div key={fact.label} className="contents">
+                <dt className="text-text-muted">{fact.label}</dt><dd className="break-words font-medium">{fact.value}</dd>
+              </div>)}
+            </dl>
+          </>}
         </section>
         <section className="rounded-lg border border-border-subtle bg-surface-2/50 p-4">
           <h3 className="text-lg font-medium">Policy rule</h3>

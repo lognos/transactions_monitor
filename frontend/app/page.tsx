@@ -1,12 +1,13 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, CheckCheck, FileClock, ListChecks, LoaderCircle, RefreshCw, ShieldCheck, Sparkles, X } from "lucide-react";
+import { ArrowRight, CheckCheck, FileClock, ListChecks, LoaderCircle, LogOut, RefreshCw, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AuditPanel } from "@/components/audit-panel";
 import { ChatPanel, type ChatMessage } from "@/components/chat-panel";
-import { ChecksDialog, ReferencesDialog } from "@/components/review-dialogs";
-import { Badge, Button, Select } from "@/components/ui";
+import { ReferencesDialog, TransactionDetails } from "@/components/review-dialogs";
+import { MicrosoftLogo, TsxMark } from "@/components/tsx-mark";
+import { Badge, Button } from "@/components/ui";
 import { api, getApiMode, setPrincipal } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { Evaluation, MemoryItem, Recommendation, TransactionSummary, Verdict } from "@/lib/types";
@@ -16,10 +17,13 @@ const recommendationLabel = (value: Recommendation) => value === "pass" ? "PASS"
 const messageOf = (error: unknown) => error instanceof Error ? error.message : "Something went wrong. Please try again.";
 type QueueData = { transactions: TransactionSummary[] };
 type ChangedRow = { before: Recommendation | null; after: Recommendation };
+// Sidebar text is hidden while the rail is collapsed (large screens only).
+const reveal = "whitespace-nowrap lg:opacity-0 lg:transition-opacity lg:duration-150 lg:group-hover/side:opacity-100 lg:group-focus-within/side:opacity-100";
 
 export default function Home() {
   const client = useQueryClient();
-  const [principalId, setPrincipalId] = useState("ana");
+  // null = logged out. Logging in picks a seeded identity; there are no passwords in this demo.
+  const [principalId, setPrincipalId] = useState<string | null>(null);
   const [focusedTxnId, setFocusedTxnId] = useState<string | null>(null);
   const [checksOpen, setChecksOpen] = useState(false);
   const [reference, setReference] = useState<{ evalId: string; criterionId: string } | null>(null);
@@ -44,7 +48,7 @@ export default function Home() {
     });
     observer.observe(pane);
     return () => observer.disconnect();
-  }, []);
+  }, [principalId]); // the split pane only exists while logged in
 
   function resizeChat(percent: number) {
     const width = splitPane.current?.getBoundingClientRect().width;
@@ -54,7 +58,7 @@ export default function Home() {
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const principals = useQuery({ queryKey: ["principals"], queryFn: api.principals });
   const people = principals.data?.principals.filter((person) => person.type === "human") ?? [];
-  const queue = useQuery({ queryKey: ["transactions"], queryFn: () => api.transactions(), enabled: Boolean(principals.data) });
+  const queue = useQuery({ queryKey: ["transactions"], queryFn: () => api.transactions(), enabled: Boolean(principals.data && principalId) });
   const transactions = queue.data?.transactions ?? [];
   const focusedTxn = transactions.find((txn) => txn.txn_id === focusedTxnId);
   const evalId = focusedTxn?.eval_id;
@@ -147,9 +151,16 @@ export default function Home() {
     },
   });
 
-  function changePrincipal(id: string) {
+  function logIn(id: string) {
     setPrincipal(id);
     setPrincipalId(id);
+    decision.reset();
+  }
+  function logOut() {
+    setPrincipal(null);
+    setPrincipalId(null);
+    setChecksOpen(false);
+    setReference(null);
     decision.reset();
   }
   function openTransaction(txn: TransactionSummary) {
@@ -164,36 +175,69 @@ export default function Home() {
     if (chat.isPending || (focusedTxnId && !evalId)) return;
     setMessages((previous) => [...previous, {
       id: crypto.randomUUID(), role: "user", text, txnId: focusedTxnId ?? undefined,
-      author: people.find((person) => person._id === principalId)?.name ?? principalId,
+      author: me?.name ?? principalId ?? "",
     }]);
     chat.mutate({ text, evaluationId: evalId ?? undefined, txnId: focusedTxnId ?? undefined });
   }
 
+  const me = people.find((person) => person._id === principalId);
   const mode = getApiMode();
   const error = principals.error ?? queue.error;
   const changedEntries = Object.entries(changedRows);
   const busy = evaluateQueue.isPending || decision.isPending;
+  const detailsOpen = checksOpen && Boolean(focusedTxnId);
 
   return (
-    <div className="flex min-h-screen flex-col lg:h-dvh lg:overflow-hidden">
-      <header className="flex flex-wrap items-center gap-x-5 gap-y-3 border-b border-border-subtle bg-surface-1 px-5 py-4">
-        <div className="mr-auto flex items-center gap-3">
-          <span className="rounded-lg border border-status-info-border bg-accent-subtle p-2"><ShieldCheck className="size-6 text-accent-fg" aria-hidden="true" /></span>
-          <div><h1 className="text-lg font-medium">Transaction Validation</h1><p className="text-sm text-text-muted">Agent recommendations. Human decisions.</p></div>
+    <div className="flex min-h-screen flex-col lg:h-dvh lg:flex-row lg:overflow-hidden">
+      {/* Sidebar: a narrow rail that expands over the content on hover or keyboard focus. */}
+      <div className="relative shrink-0 lg:w-14">
+      <aside aria-label="Sidebar" className="group/side flex flex-col gap-4 border-b border-border-subtle bg-surface-1 p-4 lg:absolute lg:inset-y-0 lg:left-0 lg:z-30 lg:w-14 lg:overflow-hidden lg:border-r lg:border-b-0 lg:px-2.5 lg:transition-[width,box-shadow] lg:duration-200 lg:hover:w-72 lg:hover:shadow-2xl lg:focus-within:w-72 lg:focus-within:shadow-2xl">
+        <h1><TsxMark /></h1>
+        <div className="flex flex-col gap-3 lg:mt-auto">
+          <div className="flex flex-wrap gap-2 lg:hidden lg:group-hover/side:flex lg:group-focus-within/side:flex">
+            {mode !== "backend" && <Badge tone="attention">{mode === "fixtures" ? "Fixture demo" : "Mixed data sources"}</Badge>}
+            <Badge tone={health.data?.ok ? "positive" : health.isPending ? "neutral" : "negative"}>
+              {health.isPending ? "checking…" : health.data?.ok ? `db: ${health.data.db}` : "backend unreachable"}
+            </Badge>
+          </div>
+          {me ? <>
+            <div className="flex items-center gap-3" title={`${me.name} · ${me.role}`}>
+              <span aria-hidden="true" className="flex size-9 shrink-0 items-center justify-center rounded-full bg-accent-subtle text-sm font-medium text-accent-fg">{me.name.charAt(0)}</span>
+              <div className={cn("min-w-0", reveal)}>
+                <p className="truncate text-sm font-medium">{me.name}</p>
+                <p className="text-xs text-text-muted capitalize">{me.role}{me.approval_limit != null ? ` · limit CAD ${me.approval_limit.toLocaleString("en-CA")}` : ""}</p>
+              </div>
+            </div>
+            <Button variant="ghost" aria-label="Log out" title="Log out" className="w-full justify-start px-2.5 whitespace-nowrap" disabled={decision.isPending} onClick={logOut}>
+              <LogOut className="size-4 shrink-0" aria-hidden="true" /><span className={reveal}>Log out</span>
+            </Button>
+          </> : <p className={cn("text-xs text-text-muted", reveal)}>Not logged in.</p>}
         </div>
-        {mode !== "backend" && <Badge tone="attention">{mode === "fixtures" ? "Fixture demo" : "Mixed data sources"}</Badge>}
-        <Badge tone={health.data?.ok ? "positive" : health.isPending ? "neutral" : "negative"}>
-          {health.isPending ? "checking…" : health.data?.ok ? `db: ${health.data.db}` : "backend unreachable"}
-        </Badge>
-        <label className="flex items-center gap-2 text-sm text-text-muted">Acting as
-          <Select id="acting-as" value={principalId} disabled={decision.isPending} onChange={(event) => changePrincipal(event.target.value)}>
-            {!people.length && <option value="ana">Loading principals…</option>}
-            {people.map((person) => <option key={person._id} value={person._id}>{person.name} · {person.role}</option>)}
-          </Select>
-        </label>
-      </header>
+      </aside>
+      </div>
+
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {error && <div role="alert" className="border-b border-status-negative-border bg-status-negative-bg px-5 py-3 text-status-negative-fg">{messageOf(error)}</div>}
 
+      {!principalId ? <div className="flex flex-1 items-center justify-center p-6">
+        <section aria-labelledby="login-title" className="flex w-full max-w-md flex-col items-center gap-8">
+          <TsxMark size="lg" />
+          <h2 id="login-title" className="sr-only">Sign in</h2>
+          {principals.isPending && <p role="status" className="flex items-center gap-2 text-sm text-text-muted"><LoaderCircle className="size-4 animate-spin" aria-hidden="true" />Loading…</p>}
+          {principals.data && !people.length && <p className="text-sm text-text-muted">No identities are seeded yet.</p>}
+          <ul className="flex w-full flex-col gap-3">
+            {people.map((person) => <li key={person._id}>
+              <button type="button" onClick={() => logIn(person._id)}
+                className="flex w-full items-center justify-center gap-3 rounded-lg border border-border-default bg-surface-2/50 px-6 py-4 text-sm text-text-default backdrop-blur-sm transition-all duration-200 hover:bg-surface-3/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus">
+                <MicrosoftLogo className="size-5 shrink-0" />
+                <span className="font-light" style={{ fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+                  Sign in as {person.name}<span className="text-text-muted capitalize"> · {person.role}</span>
+                </span>
+              </button>
+            </li>)}
+          </ul>
+        </section>
+      </div> :
       <main ref={splitPane} style={{ "--chat-width": `${chatWidth}%` } as CSSProperties}
         className={cn("grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(300px,var(--chat-width))_10px_minmax(420px,1fr)]", resizing && "cursor-col-resize select-none")}>
         <ChatPanel messages={messages} focus={focusedTxnId ? { txnId: focusedTxnId, evaluationId: evalId ?? undefined, criterionIds: evaluation.data?.checks.map((check) => check.criterion_id) ?? [] } : null}
@@ -220,9 +264,8 @@ export default function Home() {
           <span aria-hidden="true" className="h-12 w-1 rounded-full bg-border-default group-hover:bg-accent group-focus-visible:bg-accent" />
         </div>
         <section id="artifacts-pane" aria-label="Artifacts" className="flex min-h-0 flex-col border-t border-border-subtle bg-surface-base lg:border-t-0">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle px-5 py-4">
-            <h2 className="text-xs font-medium tracking-[0.16em] text-text-muted uppercase">Artifacts</h2>
-            <div role="tablist" aria-label="Artifacts" className="flex gap-1 rounded-lg border border-border-subtle bg-surface-1 p-1">
+          <div className="flex flex-wrap items-center gap-3 border-b border-border-subtle px-5 py-2">
+            <div role="tablist" aria-label="Artifacts" className="flex gap-1 rounded-lg border border-border-subtle bg-surface-1 p-0.5">
               {(["transactions", "audit"] as const).map((value, index) => {
                 const Icon = value === "transactions" ? ListChecks : FileClock;
                 return <button key={value} type="button" role="tab" id={`${value}-tab`} aria-controls={`${value}-panel`} aria-selected={tab === value} tabIndex={tab === value ? 0 : -1}
@@ -232,69 +275,70 @@ export default function Home() {
                       const next = event.key === "Home" ? "transactions" : event.key === "End" ? "audit" : index === 0 ? "audit" : "transactions";
                       setTab(next); document.getElementById(`${next}-tab`)?.focus();
                     }
-                  }} className={cn("flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-border-focus", tab === value ? "bg-surface-3 text-text-default" : "text-text-muted hover:bg-surface-2")}>
+                  }} className={cn("flex items-center gap-2 rounded-md px-3 py-1 text-sm font-medium focus-visible:outline-2 focus-visible:outline-border-focus", tab === value ? "bg-surface-3 text-text-default" : "text-text-muted hover:bg-surface-2")}>
                   <Icon className="size-4" aria-hidden="true" />{value === "transactions" ? "Transactions" : "Audit"}
                 </button>;
               })}
             </div>
-          </div>
-          {tab === "transactions" ? <div id="transactions-panel" role="tabpanel" aria-labelledby="transactions-tab" className="min-h-0 flex-1 overflow-y-auto p-5">
-            <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
-              <div><h3 className="text-xl font-medium">Review queue</h3><p className="text-sm text-text-muted">{transactions.length} transactions · {transactions.filter((txn) => txn.status === "awaiting_review").length} awaiting review</p></div>
-              <Button variant="ghost" disabled={busy || !queue.data} onClick={() => evaluateQueue.mutate(false)}>
-                {evaluateQueue.isPending ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-4" aria-hidden="true" />}
+            {tab === "transactions" && <>
+              <p className="ml-auto text-xs text-text-muted">{transactions.length} transactions · {transactions.filter((txn) => txn.status === "awaiting_review").length} awaiting review</p>
+              <Button variant="action-sm" disabled={busy || !queue.data} onClick={() => evaluateQueue.mutate(false)}>
+                {evaluateQueue.isPending ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                 {evaluateQueue.isPending ? "Evaluating…" : "Evaluate queue"}
               </Button>
-            </div>
-            {adjustments.length > 0 && <div role="status" className="mb-5 rounded-xl border-2 border-status-positive-border bg-status-positive-bg p-5 text-status-positive-fg">
-              <div className="flex items-start justify-between gap-3"><h3 className="flex items-center gap-2 text-2xl font-medium"><Sparkles className="size-6" aria-hidden="true" />Memory updated</h3>
+            </>}
+          </div>
+          {tab === "transactions" ? <div id="transactions-panel" role="tabpanel" aria-labelledby="transactions-tab" className="flex min-h-0 flex-1 flex-col">
+           {/* List on top; it shrinks to make room when a transaction's details are open below. */}
+           <div className={cn("overflow-y-auto px-5 py-3", detailsOpen ? "max-h-[40%] shrink-0" : "min-h-0 flex-1")}>
+            {adjustments.length > 0 && <div role="status" className="mb-3 rounded-lg border-2 border-status-positive-border bg-status-positive-bg p-3 text-status-positive-fg">
+              <div className="flex items-start justify-between gap-3"><h3 className="flex items-center gap-2 text-lg font-medium"><Sparkles className="size-5" aria-hidden="true" />Memory updated</h3>
                 <button type="button" aria-label="Dismiss memory update" onClick={() => { setAdjustments([]); setChangedRows({}); }} className="rounded p-1 focus-visible:outline-2 focus-visible:outline-border-focus"><X className="size-5" /></button></div>
-              {adjustments.map((item) => <p key={item.memory_id} className="mt-2 text-base leading-relaxed">{item.text}</p>)}
-              <p className="mt-2 font-medium">{evaluateQueue.isPending ? "Applying the new guidance to undecided transactions…" : `${changedEntries.length} recommendation${changedEntries.length === 1 ? "" : "s"} changed`}</p>
+              {adjustments.map((item) => <p key={item.memory_id} className="mt-1 text-sm leading-relaxed">{item.text}</p>)}
+              <p className="mt-1 text-sm font-medium">{evaluateQueue.isPending ? "Applying the new guidance to undecided transactions…" : `${changedEntries.length} recommendation${changedEntries.length === 1 ? "" : "s"} changed`}</p>
               {queueError && <Button variant="ghost" className="mt-3" disabled={busy} onClick={() => evaluateQueue.mutate(true)}>Retry applying memory</Button>}
             </div>}
             {queueError && <div role="alert" className="mb-4 rounded-lg border border-status-negative-border bg-status-negative-bg p-4 text-status-negative-fg">{queueError}</div>}
             {changedEntries.length > 0 && <div aria-live="polite" className="mb-4 flex flex-col gap-2">
-              {changedEntries.map(([id, change]) => <p key={id} className="flex flex-wrap items-center gap-3 text-xl font-medium text-status-positive-fg"><CheckCheck className="size-6" aria-hidden="true" />{id}<span>{change.before ? recommendationLabel(change.before) : "Pending"}</span><ArrowRight className="size-5" aria-label="changed to" />{recommendationLabel(change.after)}</p>)}
+              {changedEntries.map(([id, change]) => <p key={id} className="flex flex-wrap items-center gap-2 text-base font-medium text-status-positive-fg"><CheckCheck className="size-5" aria-hidden="true" />{id}<span>{change.before ? recommendationLabel(change.before) : "Pending"}</span><ArrowRight className="size-5" aria-label="changed to" />{recommendationLabel(change.after)}</p>)}
             </div>}
             {queue.isLoading && <p role="status" className="flex items-center gap-2 py-8 text-text-muted"><LoaderCircle className="size-5 animate-spin" />Loading transactions…</p>}
             {!queue.isLoading && queue.data && !transactions.length && <p className="rounded-lg border border-border-subtle p-8 text-center text-text-muted">No transactions in the queue.</p>}
-            <ul className="space-y-3" aria-label="Transactions">
+            <ul className="space-y-1.5" aria-label="Transactions">
               {transactions.map((txn) => {
                 const loading = loadingRows.includes(txn.txn_id);
                 const changed = changedRows[txn.txn_id];
                 return <li key={txn.txn_id}>
                   <button type="button" disabled={loading || decision.isPending} onClick={() => openTransaction(txn)} aria-busy={loading}
-                    className={cn("w-full rounded-xl border p-4 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus disabled:cursor-wait",
-                      changed ? "border-2 border-status-positive-border bg-status-positive-bg" : focusedTxnId === txn.txn_id ? "border-accent bg-accent-subtle" : "border-border-default bg-surface-1 hover:bg-surface-2")}>
-                    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-                      <div className="flex items-center gap-3"><span className="font-mono text-base font-medium">{txn.txn_id}</span><span className="text-sm text-text-muted capitalize">{txn.type}</span></div>
-                      <span className="text-lg font-medium">{txn.currency} {txn.amount.toLocaleString("en-CA")}</span>
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
-                      <div><p className="text-base text-text-default">{txn.customer_name}</p><p className="mt-0.5 text-sm text-text-muted">{statusLabels[txn.status]}</p></div>
-                      <div className="flex flex-wrap items-center justify-end gap-2">
-                        {loading ? <span role="status" className="flex items-center gap-2 text-accent-fg"><LoaderCircle className="size-5 animate-spin" aria-hidden="true" />Evaluating…</span> : txn.recommendation ? <>
-                          {changed && <span className="text-sm font-medium text-status-positive-fg">Changed to</span>}
-                          <Badge tone={txn.recommendation === "pass" ? "positive" : "negative"} className="px-3 py-1 text-base">{recommendationLabel(txn.recommendation)}</Badge>
-                          <span className="text-sm text-text-muted">{txn.failed_checks.length} failed {txn.failed_checks.length === 1 ? "check" : "checks"}</span>
-                        </> : <Badge>Not evaluated</Badge>}
-                      </div>
-                    </div>
+                    aria-expanded={detailsOpen && focusedTxnId === txn.txn_id}
+                    className={cn("grid w-full grid-cols-[5.25rem_3.25rem_minmax(0,1fr)_auto_10.5rem] items-center gap-3 rounded-md border px-3 py-1.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus disabled:cursor-wait",
+                      changed ? "border-2 border-status-positive-border bg-status-positive-bg" : focusedTxnId === txn.txn_id ? "border-accent bg-accent-subtle" : "border-border-subtle bg-surface-1 hover:bg-surface-2")}>
+                    <span className="font-mono text-xs font-medium">{txn.txn_id}</span>
+                    <span className="text-xs text-text-muted capitalize">{txn.type}</span>
+                    <span className="truncate">{txn.customer_name}<span className="ml-2 text-xs text-text-subtle">{statusLabels[txn.status]}</span></span>
+                    <span className="font-medium">{txn.currency} {txn.amount.toLocaleString("en-CA")}</span>
+                    <span className="flex items-center justify-end gap-2">
+                      {loading ? <span role="status" className="flex items-center gap-1.5 text-xs text-accent-fg"><LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />Evaluating…</span> : txn.recommendation ? <>
+                        <span className="text-xs text-text-muted">{changed ? "changed · " : ""}{txn.failed_checks.length} failed</span>
+                        <Badge tone={txn.recommendation === "pass" ? "positive" : "negative"}>{recommendationLabel(txn.recommendation)}</Badge>
+                      </> : <Badge>Not evaluated</Badge>}
+                    </span>
                   </button>
                 </li>;
               })}
             </ul>
+           </div>
+           {detailsOpen && <TransactionDetails evaluation={evaluation.data} loading={Boolean(evalId) && evaluation.isPending}
+             error={evaluation.error?.message ?? (!evalId ? "This transaction has no evaluation yet. Use Evaluate queue to retry." : null)}
+             busy={decision.isPending} decisionError={decision.error?.message} principals={people}
+             onClose={() => setChecksOpen(false)} onReferences={openReferences} onDecide={(verdict, comments) => { if (evalId) decision.mutate({ evaluationId: evalId, verdict, comments }); }} />}
           </div> : <div id="audit-panel" role="tabpanel" aria-labelledby="audit-tab" className="min-h-0 flex-1 overflow-y-auto p-5">
             <AuditPanel events={audit.data?.events ?? []} loading={audit.isLoading} error={audit.error?.message ?? verify.error?.message} focusTxnId={focusedTxnId}
               verification={verify.data} verifying={verify.isPending} onVerify={() => verify.mutate()} principals={people} />
           </div>}
         </section>
-      </main>
-      <ChecksDialog open={checksOpen} evaluation={evaluation.data} loading={Boolean(evalId) && evaluation.isPending}
-        error={evaluation.error?.message ?? (checksOpen && !evalId ? "This transaction has no evaluation yet. Close this dialog and use Evaluate queue to retry." : null)}
-        busy={decision.isPending} decisionError={decision.error?.message} principals={people} principalId={principalId} onPrincipalChange={changePrincipal}
-        onClose={() => setChecksOpen(false)} onReferences={openReferences} onDecide={(verdict, comments) => { if (evalId) decision.mutate({ evaluationId: evalId, verdict, comments }); }} />
+      </main>}
+      </div>
       <ReferencesDialog open={Boolean(reference)} references={references.data} loading={references.isPending} error={references.error?.message} onClose={() => setReference(null)} />
     </div>
   );

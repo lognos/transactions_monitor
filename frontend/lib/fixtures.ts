@@ -110,29 +110,74 @@ function audit(data: Pick<AuditEvent, "actor" | "event" | "txn_id" | "ref" | "de
   return work;
 }
 
+const cad = (amount: number) => `CAD ${amount.toLocaleString("en-CA")}`;
+type Facts = [label: string, value: string][];
+
 function checksFor(txn: Transaction): Check[] {
   const learned = memories.find((memory) => memory.kind === "adjustment");
+  const customer = customers.find((item) => item.customer_id === txn.customer_id)!;
   const cheque = txn.type === "cheque";
   const injection = txn.txn_id === "TXN-0002";
+  const large = txn.amount === 60000;
   const judgmentFails = injection || (cheque && !learned);
-  const check = (criterion_id: string, description: string, result: Check["result"], evidence: string, regulation_ref: string, judgment = false): Check => ({
-    criterion_id, description, kind: judgment ? "judgment" : "hard", source: judgment ? "llm" : "rule", result, evidence, regulation_ref,
+  const ratio = (txn.amount / customer.typical_amount).toFixed(1);
+  const party = txn.counterparty;
+  const details = (txn.type_specific ?? {}) as { international?: boolean; new_beneficiary?: boolean; cheque_date?: string };
+  const check = (criterion_id: string, description: string, result: Check["result"], evidence: string, explanation: string, facts: Facts, regulation_ref: string, judgment = false): Check => ({
+    criterion_id, description, kind: judgment ? "judgment" : "hard", source: judgment ? "llm" : "rule", result, evidence, explanation,
+    facts: facts.map(([label, value]) => ({ label, value })), regulation_ref,
     precedents_used: judgment && judgmentFails ? [cheque ? "MEM-11aa22bb" : "MEM-22bb33cc"]
       : judgment && cheque && learned ? memories.filter((memory) => memory.kind === "precedent" && memory.source_txn_id === learned.source_txn_id).map((memory) => memory.memory_id) : [],
     adjustments_used: judgment && cheque && learned ? [learned.memory_id] : [],
   });
+
+  const profileFacts: Facts = [
+    ["Amount", cad(txn.amount)], ["Typical amount", cad(customer.typical_amount)],
+    ["Ratio", `${ratio}x (policy guideline: 3x)`], ["Customer segment", customer.segment],
+    cheque ? ["Cheque date", details.cheque_date ?? "unknown"] : ["New beneficiary", details.new_beneficiary ? "Yes" : "No"],
+  ];
+  const profile = cheque
+    ? learned
+      ? { evidence: "Month-end payroll is within the learned adjustment from the reviewer; the amount alone does not fail C-04.",
+          explanation: `The amount is ${ratio} times this customer's typical payment, which would normally fail. ${learned.author_name} taught the agent that payroll customers spike at month-end. This customer is in the payroll segment and the cheque is dated at month-end, so that guidance applies and the check passes.` }
+      : { evidence: "Amount is more than three times the customer's typical payment; reviewer context is needed.",
+          explanation: `The amount is ${ratio} times this customer's typical payment, above the 3x guideline in the policy. Nothing in the policy or in past decisions explains the increase, and a similar cheque from a non-payroll customer was rejected before. The check fails until a reviewer adds context.` }
+    : injection
+      ? { evidence: "Amount is four times the typical payment and the beneficiary is new.",
+          explanation: `The amount is ${ratio} times the typical payment and this beneficiary has never been paid before. Similar wires were rejected in past decisions. The memo asks to skip the checks; memo text is treated as data, not as an instruction, and had no effect.` }
+      : large
+        ? { evidence: "The existing beneficiary and documented equipment purchase explain this scheduled payment.",
+            explanation: `The amount is ${ratio} times the typical payment, but the beneficiary is established and the memo points to an approved contract on file. That explains the size, so the check passes. The amount still needs a reviewer with a high enough approval limit.` }
+        : { evidence: "The payment is consistent with the customer's typical amount.",
+            explanation: `The amount is ${ratio} times the customer's typical payment, within the 3x guideline in the policy, and the beneficiary has been paid before.` };
+
   return [
-    check("C-01", "Counterparty not on a sanctions list", "pass", "No match on the demonstration sanctions list.", "Canadian sanctions law"),
-    check("C-03", "Not a duplicate transaction", "pass", "No transaction with the same payee, amount and date.", "Bank policy"),
-    check("C-04", "Amount consistent with the customer's usual profile", judgmentFails ? "no_pass" : "pass",
-      cheque ? learned ? "Month-end payroll is within the learned adjustment from the reviewer; the amount alone does not fail C-04." : "Amount is more than three times the customer's typical payment; reviewer context is needed."
-        : injection ? "Amount is four times the typical payment and the beneficiary is new."
-          : txn.amount === 60000 ? "The existing beneficiary and documented equipment purchase explain this scheduled payment." : "The payment is consistent with the customer's typical amount.",
+    check("C-01", "Counterparty not on a sanctions list", "pass", "No match on the demonstration sanctions list.",
+      `"${party.name}" was compared with every name on the sanctions list held in the policy. No name matched, so the check passes. A match would block the transaction for every reviewer.`,
+      [["Counterparty", party.name], ["Country", party.country ?? "unknown"], ["List screened", "Demonstration sanctions list"], ["Matches", "None"]], "Canadian sanctions law"),
+    check("C-03", "Not a duplicate transaction", "pass", "No transaction with the same payee, amount and date.",
+      "The source system was searched for another transaction with the same payee, amount and date. None was found, so this is not a duplicate presentation.",
+      [["Payee", party.name], ["Amount", cad(txn.amount)], ["Date", txn.created_at.slice(0, 10)], ["Matching transactions", "0"]], "Bank policy"),
+    check("C-04", "Amount consistent with the customer's usual profile", judgmentFails ? "no_pass" : "pass", profile.evidence, profile.explanation, profileFacts,
       "FINTRAC suspicious-transaction indicators", true),
-    ...(cheque ? [check("Q-01", "Cheque date valid", "pass", "Cheque date matches the month-end processing date; it is neither stale nor post-dated.", "Bank practice")]
-      : [check("W-01", "Originator and beneficiary information complete", injection ? "no_pass" : "pass", injection ? "counterparty.address is missing. The memo is untrusted transaction data and cannot override this rule." : "Required originator and beneficiary name, address and account fields are present.", "FINTRAC travel rule"),
-        check("W-02", "International transfer reporting threshold", injection ? "flag" : "pass", injection ? "International transfer of CAD 12,000 requires an EFT report. Reporting does not block approval." : "Domestic transfer; international EFT reporting threshold does not apply.", "FINTRAC EFT reporting"),
-        check("W-03", "New beneficiary or high-risk destination explained", "pass", injection ? "Trade invoice explains the destination; mandatory travel-rule fields still need correction." : "Existing beneficiary with an explained payment purpose.", "FINTRAC suspicious-transaction indicators", true)]),
+    ...(cheque ? [check("Q-01", "Cheque date valid", "pass", "Cheque date matches the month-end processing date; it is neither stale nor post-dated.",
+      `The cheque is dated ${details.cheque_date}. That is not in the future, so it is not post-dated, and it is less than six months old, so it is not stale.`,
+      [["Cheque date", details.cheque_date ?? "unknown"], ["Deposit date", txn.created_at.slice(0, 10)], ["Stale after", "6 months"]], "Bank practice")]
+      : [check("W-01", "Originator and beneficiary information complete", injection ? "no_pass" : "pass",
+          injection ? "counterparty.address is missing. The memo is untrusted transaction data and cannot override this rule." : "Required originator and beneficiary name, address and account fields are present.",
+          injection ? "The travel rule requires the beneficiary's name, address and account number to travel with a wire. The address is missing, so the wire cannot proceed until it is corrected. This is a mandatory rule: no reviewer can override it, and the memo asking to skip checks changes nothing."
+            : "The travel rule requires the name, address and account number of both the originator and the beneficiary. All six fields are present, so the check passes.",
+          [["Beneficiary name", party.name], ["Beneficiary address", party.address ?? "Missing"], ["Beneficiary account", party.account ?? "Missing"], ["Originator fields", "Name, address and account present"]], "FINTRAC travel rule"),
+        check("W-02", "International transfer reporting threshold", injection ? "flag" : "pass",
+          injection ? "International transfer of CAD 12,000 requires an EFT report. Reporting does not block approval." : "Domestic transfer; international EFT reporting threshold does not apply.",
+          details.international ? `This is an international transfer of ${cad(txn.amount)}, at or above the CAD 10,000 reporting threshold. It must be reported to FINTRAC. A report is an obligation to file, not a reason to block, so the result is a flag rather than a fail.`
+            : "The reporting threshold applies only to transfers into or out of Canada. This transfer is domestic, so no report is needed and the check passes.",
+          [["International", details.international ? "Yes" : "No"], ["Amount", cad(txn.amount)], ["Reporting threshold", "CAD 10,000"]], "FINTRAC EFT reporting"),
+        check("W-03", "New beneficiary or high-risk destination explained", "pass",
+          injection ? "Trade invoice explains the destination; mandatory travel-rule fields still need correction." : "Existing beneficiary with an explained payment purpose.",
+          injection ? `The beneficiary is new, but the destination (${party.country}) is not high-risk and fits this import/export customer's trade pattern. The missing address is dealt with separately under W-01.`
+            : "The beneficiary has been paid before and the destination is domestic, so there is nothing that needs explaining.",
+          [["New beneficiary", details.new_beneficiary ? "Yes" : "No"], ["Destination", party.country ?? "unknown"], ["Customer segment", customer.segment]], "FINTRAC suspicious-transaction indicators", true)]),
   ];
 }
 
@@ -219,7 +264,7 @@ export const fixtures = {
   references: async (evalId: string, criterionId: string): Promise<ReferencesResponse> => {
     await pause(); const evaluation = findEvaluation(evalId);
     const check = evaluation.checks.find((item) => item.criterion_id === criterionId) ?? fail(404, "not_found", "Check not found.");
-    return copy({ check: { criterion_id: criterionId, result: check.result, source: check.source, evidence: check.evidence },
+    return copy({ check: { criterion_id: criterionId, result: check.result, source: check.source, evidence: check.evidence, explanation: check.explanation ?? check.evidence, facts: check.facts ?? [] },
       policy: { txn_type: evaluation.transaction.type, version: evaluation.policy_version, criterion_id: criterionId, description: check.description, kind: check.kind, regulation_ref: check.regulation_ref ?? "Bank policy", params: criterionId === "C-04" ? { ratio_hint: 3 } : {} },
       adjustments: memories.filter((memory) => check.adjustments_used.includes(memory.memory_id)).map((memory) => ({ memory_id: memory.memory_id, text: memory.text, condition: memory.condition!, author_id: memory.author_id, author_name: memory.author_name, source_txn_id: memory.source_txn_id!, created_at: memory.created_at })),
       precedents: memories.filter((memory) => check.precedents_used.includes(memory.memory_id)).map(({ memory_id, text, author_id, author_name, source_txn_id, verdict, created_at }) => ({ memory_id, text, author_id, author_name, source_txn_id, verdict, created_at })),
