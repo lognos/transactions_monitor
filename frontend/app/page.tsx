@@ -107,12 +107,15 @@ export default function Home() {
 
   const simulateQueue = useMutation({
     mutationFn: (mode: "random" | "signals") =>
-      api.simulate({ count: mode === "signals" ? 2 : 3, mode, policy_only: false }),
+      api.simulate({ count: mode === "signals" ? 2 : 1, mode, policy_only: false }),
     onMutate: () => {
       setQueueError(null);
       verify.reset();
     },
     onSuccess: async (result) => {
+      // Simulation already attempted these evaluations. In particular, a model
+      // failure must not immediately trigger another attempt via the queue effect.
+      result.failed.forEach((item) => autoAttempted.current.add(item.txn_id));
       setQueueError(result.failed.length ? result.failed.map((item) => `${item.txn_id}: ${item.error}`).join(" · ") : null);
       await Promise.all([
         client.invalidateQueries({ queryKey: ["transactions"] }),
@@ -194,13 +197,11 @@ export default function Home() {
         transactions: old.transactions.map((txn) => txn.txn_id === result.decision.txn_id ? { ...txn, status: result.transaction_status } : txn),
       } : old);
       const learned = result.memory_created.filter((item) => item.kind === "adjustment");
-      if (result.decision.verdict === "approved" && learned.length) {
+      if (learned.length) {
         setAdjustments(learned);
         setChangedRows({});
         setChecksOpen(false);
         setTab("transactions");
-        // Refresh errors belong to the queue: the decision has already succeeded.
-        evaluateQueue.mutate(true);
       }
       await Promise.all([
         client.invalidateQueries({ queryKey: ["transactions"] }),
@@ -367,7 +368,7 @@ export default function Home() {
             </div>
             {tab === "transactions" && <>
               <p className="ml-auto text-xs text-text-muted">{transactions.length} transactions · {transactions.filter((txn) => txn.status === "awaiting_review").length} awaiting review</p>
-              <Button variant="action-sm" disabled={busy || !queue.data} onClick={() => simulateQueue.mutate("random")} title="Pull 3 random transactions from the consolidated CSV and run policy checks">
+              <Button variant="action-sm" disabled={busy || !queue.data} onClick={() => simulateQueue.mutate("random")} title="Pull 1 random transaction from the consolidated CSV and evaluate it">
                 {simulateQueue.isPending && simulateQueue.variables === "random" ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <Play className="size-3.5" aria-hidden="true" />}
                 Simulate CSV
               </Button>
@@ -388,8 +389,7 @@ export default function Home() {
               <div className="flex items-start justify-between gap-3"><h3 className="flex items-center gap-2 text-lg font-medium"><Sparkles className="size-5" aria-hidden="true" />Memory updated</h3>
                 <button type="button" aria-label="Dismiss memory update" onClick={() => { setAdjustments([]); setChangedRows({}); }} className="rounded p-1 focus-visible:outline-2 focus-visible:outline-border-focus"><X className="size-5" /></button></div>
               {adjustments.map((item) => <p key={item.memory_id} className="mt-1 text-sm leading-relaxed">{item.text}</p>)}
-              <p className="mt-1 text-sm font-medium">{evaluateQueue.isPending ? "Applying the new guidance to undecided transactions…" : `${changedEntries.length} recommendation${changedEntries.length === 1 ? "" : "s"} changed`}</p>
-              {queueError && <Button variant="ghost" className="mt-3" disabled={busy} onClick={() => evaluateQueue.mutate(true)}>Retry applying memory</Button>}
+              <p className="mt-1 text-sm font-medium">New evaluations will consider this guidance.</p>
             </div>}
             {queueError && <div role="alert" className="mb-4 rounded-lg border border-status-negative-border bg-status-negative-bg p-4 text-status-negative-fg">{queueError}</div>}
             {changedEntries.length > 0 && <div aria-live="polite" className="mb-4 flex flex-col gap-2">
