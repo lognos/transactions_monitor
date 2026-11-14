@@ -2,6 +2,8 @@
 
 Owner: Tixa. Document shapes come from [contracts.md](contracts.md) §3.
 
+> **Proposed, not agreed yet:** decisions become Approve / Reject, and reviewers can override individual checks. See [contracts.md §8](contracts.md#8-check-overrides-and-decisions). Until the team confirms, this plan stands as written.
+
 ## Goal
 
 Five scenarios that run in order as the 3-minute demo, the seed data that makes each one behave, and the pitch around them.

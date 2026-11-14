@@ -2,6 +2,8 @@
 
 Owner: Facundo. Request and response shapes come from [contracts.md](contracts.md) §4.
 
+> **Proposed, not agreed yet:** decisions become Approve / Reject, and reviewers can override individual checks. See [contracts.md §8](contracts.md#8-check-overrides-and-decisions). Until the team confirms, this plan stands as written.
+
 This lane owns both sides of the HTTP contract: `frontend/` and the FastAPI routes in `backend/app/server/`. The server is thin: it reads MongoDB for lists and lookups and calls the agent through three functions (contracts §5.5).
 
 ## Goal

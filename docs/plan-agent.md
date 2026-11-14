@@ -2,6 +2,8 @@
 
 Owner: buddybud24. Shapes and names come from [contracts.md](contracts.md).
 
+> **Proposed, not agreed yet:** decisions become Approve / Reject, and reviewers can override individual checks. See [contracts.md §8](contracts.md#8-check-overrides-and-decisions). Until the team confirms, this plan stands as written.
+
 ## Goal
 
 Two small LangGraph graphs behind a FastAPI app:
