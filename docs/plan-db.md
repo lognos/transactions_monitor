@@ -1,6 +1,6 @@
 # Plan 1 — DB
 
-Owner: Facundo. Shapes and names come from [contracts.md](contracts.md).
+Owner: Ben. Shapes and names come from [contracts.md](contracts.md).
 
 ## Goal
 
@@ -12,10 +12,10 @@ Done when a seeded transaction can be saved together with an audit event, and `v
 
 | File | What it does |
 | --- | --- |
-| `backend/scripts/setup_db.py` | Creates the nine collections, indexes, the `audit_log` validator, the vector index. Safe to re-run |
-| `backend/app/db.py` | One `AsyncMongoClient`, collection handles, session helper |
-| `backend/app/audit.py` | `write_with_audit`, `verify_chain` (contracts §5.1) |
-| `backend/app/gate.py` | `check_gate` (contracts §5.2) |
+| `backend/scripts/setup_db.py` | Creates the nine collections, indexes, the `audit_log` validator, the vector index. Safe to re-run. Scaffolded: collections, indexes and the `chain_head` genesis document; validator and vector index still to add |
+| `backend/app/db/client.py` | One `AsyncMongoClient`, `get_db`, `ping`. Done |
+| `backend/app/db/audit.py` | `write_with_audit`, `verify_chain` (contracts §5.1). Signatures and hash helpers in place, bodies to write |
+| `backend/app/db/gate.py` | `check_gate` (contracts §5.2). Signature in place, body to write |
 
 Seeding (`seed.py`) belongs to the Scenarios lane and runs after `setup_db.py`.
 

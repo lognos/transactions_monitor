@@ -29,7 +29,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.venv
+.venv/
 venv/
 ENV/
 env/
@@ -40,10 +40,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-dist/
 out/
-build/
 .next/
+next-env.d.ts
+*.tsbuildinfo
 
 # Operating System & IDE
 .DS_Store

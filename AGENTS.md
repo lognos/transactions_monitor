@@ -19,6 +19,7 @@ A LangGraph agent evaluates bank transactions against a checklist, recommends pa
 ## Hackathon rules (hard constraints)
 
 - All code is written during the event. Do not copy code from other projects, templates with business logic, or earlier work. Scaffolding tools and package installs are fine.
+- The frontend follows the look of the LOGNOS ASSIST app (same libraries, same token names). Do not copy files from that repository; write components here, in `frontend/components/ui/`.
 - Seed data is created at the event. Only public, open-source data may be imported.
 - Commit small and often (every 30–60 minutes). The repository is reviewed during the event.
 - Never commit `.env` or any secret. Do not print secrets in logs or commit messages.
@@ -27,10 +28,15 @@ A LangGraph agent evaluates bank transactions against a checklist, recommends pa
 
 | Lane | Owner | Paths |
 | --- | --- | --- |
-| DB | Facundo | `backend/scripts/setup_db.py`, `backend/app/db.py`, `backend/app/audit.py`, `backend/app/gate.py` |
-| Agent | Ben | `backend/app/main.py`, `models.py`, `checks.py`, `memory.py`, `prompts.py`, `llm.py`, `backend/app/graphs/` |
-| UI | buddybud24 | `frontend/` |
+| DB | Ben | `backend/app/db/` (client, audit, gate), `backend/app/config.py`, `backend/scripts/setup_db.py`, `backend/scripts/ping_db.py` |
+| Agent | buddybud24 | `backend/app/agent/` (graphs, checks, memory, prompts, llm, schemas, service) |
+| UI + server | Facundo | `frontend/`, `backend/app/server/` (routes, request bodies, errors, principal header) |
 | Scenarios | Tixa | `backend/scripts/seed.py`, `docs/pitch.md` |
+
+Import rules between backend packages:
+- `app.server` imports `app.agent` only through `run_evaluate` and `run_review`, and reads MongoDB for lists and lookups.
+- `app.agent` imports `app.db`. It never imports `app.server`.
+- `app.db` imports neither.
 
 Stay inside the lane of the person you are working for. If a task needs a change in another lane's files or in `docs/contracts.md`, say so and let the human coordinate it.
 
@@ -50,6 +56,7 @@ Stay inside the lane of the person you are working for. If a task needs a change
 - Python 3.11+, async throughout (`AsyncMongoClient`, async FastAPI routes, `graph.ainvoke`).
 - Type hints on public functions. Pydantic models for API bodies and LLM outputs.
 - `snake_case` field names, readable string ids (`TXN-0001`, `EVAL-<8 hex>`), UTC timestamps.
+- Frontend: Next.js 16 App Router, TypeScript, Tailwind CSS 4. `frontend/AGENTS.md` says to read `node_modules/next/dist/docs/` before writing Next.js code; do that. Style with the semantic token classes from `app/globals.css`, never raw colours.
 - LangGraph: `StateGraph` with `TypedDict` state, one function per node, no checkpointer, no `interrupt()`.
 - Keep it small. No abstractions for things used once, no extra endpoints, no auth, no Docker, no CI.
 - Prefer fixing seed data over adding code when a scenario misbehaves.
@@ -60,21 +67,26 @@ Variables are read from `.env` (not committed):
 
 | Variable | Purpose |
 | --- | --- |
-| `MONGODB_URI` | Atlas connection string |
+| `MONGODB_CONNECTION_STRING` (or `MONGODB_URI`) | Atlas connection string |
 | `DB_NAME` | `txn_validation` |
-| LLM provider key | Whichever provider the team picks at kickoff |
+| `GOOGLE_API_KEY` | LLM provider key |
+| `LLM_MODEL` | `<provider>:<model>` for `init_chat_model`, default `google_genai:gemini-2.5-flash` |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | LangSmith tracing |
 
 ## Commands
 
-Planned. Update this section as soon as the scaffolding exists.
+Backend commands run from `backend/`, frontend commands from `frontend/`.
 
 | Task | Command |
 | --- | --- |
-| Create collections and indexes | `python backend/scripts/setup_db.py` |
-| Reset and seed demo data | `python backend/scripts/seed.py` |
-| Run the API | `uvicorn app.main:app --reload --port 8000` (from `backend/`) |
-| Run the UI | `npm run dev` (from `frontend/`) |
+| Install backend packages | `uv sync` |
+| Check the database connection | `uv run python -m scripts.ping_db` |
+| Create collections and indexes | `uv run python -m scripts.setup_db` |
+| Reset and seed demo data | `uv run python -m scripts.seed` |
+| Run the API | `uv run uvicorn app.server.main:app --reload --port 8010` |
+| Install frontend packages | `npm install` |
+| Run the UI | `npm run dev` (http://localhost:3000, forwards `/api` to port 8010) |
+| Check the UI | `npm run build` and `npm run lint` |
 
 ## How to verify a change
 

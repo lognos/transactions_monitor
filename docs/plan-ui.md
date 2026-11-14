@@ -1,6 +1,8 @@
-# Plan 2 — UI
+# Plan 2 — UI and server
 
-Owner: buddybud24. Request and response shapes come from [contracts.md](contracts.md) §4.
+Owner: Facundo. Request and response shapes come from [contracts.md](contracts.md) §4.
+
+This lane owns both sides of the HTTP contract: `frontend/` and the FastAPI routes in `backend/app/server/`. The routes are scaffolded and thin. They read MongoDB for lists and lookups and call the agent through two functions (contracts §5.5). Left to do on the server: add `customer_name`, `counterparty_name` and `eval_id` to `GET /transactions`, and add citation labels to `POST /ask`.
 
 ## Goal
 
@@ -10,8 +12,21 @@ Done when all five scenarios in [plan-scenarios.md](plan-scenarios.md) can be cl
 
 ## Stack
 
-Recommended: Vite + React, plain CSS, `fetch`. No router, no state library, no component kit.
-The owner can swap this for whatever they are fastest in. The contract is the HTTP API, not the framework.
+Same libraries and visual style as the LOGNOS ASSIST frontend, scaffolded in `frontend/`:
+
+| Piece | Choice |
+| --- | --- |
+| Framework | Next.js 16 (App Router), React 19, TypeScript |
+| Styling | Tailwind CSS 4, tokens in `app/globals.css` (surface, border, text, accent and status roles; dark by default) |
+| Fonts | Inter and Roboto Mono through `next/font` |
+| Helpers | `clsx` + `tailwind-merge` (`lib/cn.ts`), `lucide-react` icons, TanStack Query for data fetching |
+| UI components | `components/ui/`: `Button` (primary, ghost, action-sm, danger), `Badge` (neutral, info, positive, attention, negative), `Select` |
+
+Already in place: `lib/api.ts` (one typed function per HTTP call), `lib/types.ts` (contract shapes), and `app/page.tsx` with the header, the "acting as" dropdown, the connection badge and the queue.
+
+Hackathon rule: the look follows ASSIST, but every file here is written at the event. Do not copy component or stylesheet files from the ASSIST repository. New components go in `components/ui/` and use the semantic token classes (`bg-surface-1`, `text-text-muted`, `border-border-subtle`, `bg-status-positive-bg`), never raw colours.
+
+Check mapping for the review card: `pass` → `Badge tone="positive"`, `no_pass` → `negative`, `flag` → `attention`, `rule` / `LLM` tag → `neutral` / `info`.
 
 ## Layout
 
@@ -69,7 +84,7 @@ The owner can swap this for whatever they are fastest in. The contract is the HT
 
 ## Working without the backend
 
-Build against the fixture file first. Keep one function per API call in a single `api.js`, each returning the fixture until its endpoint exists, so switching to the real API is a one-line change per call. The backend must allow the UI's origin (CORS) or the UI proxies `/api` to port 8000.
+Build against the fixture file first. Keep one function per API call in `lib/api.ts`, each returning the fixture until its endpoint exists, so switching to the real API is a one-line change per call. The backend must allow the UI's origin (CORS) or the UI proxies `/api` to port 8010 (already set in `next.config.ts`).
 
 ## Cut order
 
