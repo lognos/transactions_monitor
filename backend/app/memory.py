@@ -8,7 +8,10 @@ Implements the contract interface for memory and precedent retrieval (contracts 
 """
 
 from typing import List, Dict, Any, Optional
-from backend.app.db import get_async_db, get_sync_db
+try:
+    from app.db import get_async_db, get_sync_db
+except ImportError:
+    from backend.app.db import get_async_db, get_sync_db
 
 INDEX_NAME = "memory_text_idx"
 
