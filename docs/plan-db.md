@@ -2,6 +2,8 @@
 
 Owner: Ben. Shapes and names come from [contracts.md](contracts.md).
 
+> **Proposed, not agreed yet:** decisions become Approve / Reject, and reviewers can override individual checks. See [contracts.md §8](contracts.md#8-check-overrides-and-decisions). Until the team confirms, this plan stands as written.
+
 ## Goal
 
 MongoDB Atlas is the identity, policy and audit layer. This lane delivers the database, plus the three small Python modules everything else writes through.
