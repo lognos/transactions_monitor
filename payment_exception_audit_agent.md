@@ -16,48 +16,67 @@ This project implements an **autonomous AI operations agent that investigates an
 
 ---
 
-## 2. MongoDB Atlas Architecture & Schema Design
+## 2. Policy Engine Evaluation & Architecture
+
+Banks handle thousands of payment exceptions every day, such as returned cheques, duplicate items, amount mismatches, and suspicious transfers. AI agents could resolve many of these, but banks cannot deploy an agent unless every action is tied to an identity and approved by policy before execution.
+
+The hackathon rules specify that **MongoDB Atlas must serve as the identity, policy, and audit layer**. Therefore, policies are stored directly in Atlas, using an open-source policy engine strictly to evaluate them in-memory. This keeps MongoDB at the center of the architecture.
+
+### Open-Source Policy Engine Options
+
+| Engine | Policy Language | Works with MongoDB? | Fit for a One-Day Build |
+| :--- | :--- | :--- | :--- |
+| **Casbin ⭐** | RBAC / ABAC model + policy rules | **Yes, native adapter (`casbin-pymongo-adapter`)** stores policies directly in Atlas | ⭐⭐⭐ **Easiest; policies live in Atlas** |
+| **Open Policy Agent (OPA)** | Rego | Indirect: load policy data from Atlas into OPA | ⭐⭐ Industry standard, but Rego takes time to learn |
+| **Cerbos** | YAML | Indirect: store YAML in Atlas and sync it | ⭐⭐ Readable, but runs as a separate server |
+| **Cedar (AWS)** | Cedar | Store policy text in Atlas, evaluate with `cedarpy` | ⭐⭐ Elegant, but newer |
+| **OpenFGA** | Relationship-based (Zanzibar) | Separate store | ⭐ Overkill for this hackathon |
+
+> [!TIP]
+> **Recommendation:** **Casbin with the MongoDB adapter (`casbin-pymongo-adapter`)**.  
+> Policies sit directly in an Atlas collection, supporting roles, attributes, and monetary amount limits. It can be implemented and working in under an hour.
+
+---
+
+### End-to-End System Architecture
 
 ```mermaid
 flowchart TD
-    User([Human Operator]) -->|Delegates Task| Agent([LLM Agent])
-    Agent -->|1. Proposes Tool Call| Gate[Atlas Policy Interceptor]
+    Operator([Operator / Identity]) -->|Delegates Task| Agent([Agent: LLM + Tools])
+    Agent -->|Every Tool Call| Gate[Policy Gate: Casbin + Atlas]
     
-    subgraph MongoDB_Atlas [MongoDB Atlas Governance Layer]
-        Identities[(identities)]
-        Policies[(policies)]
-        Payments[(payments)]
-        Audit[(audit_events\nHash-Chained & Immutable)]
-        ChangeStreams[Atlas Change Streams]
+    subgraph GateChecks ["Policy Gate Checks"]
+        C1["1. Who? (identities collection)"]
+        C2["2. Allowed? (policies via casbin-pymongo-adapter)"]
+        C3["3. Log Decision (audit_events)"]
     end
-
-    Gate -->|Verify Authority| Identities
-    Gate -->|Evaluate Rules| Policies
+    Gate --> GateChecks
     
-    Gate -->|Allowed| Exec[Execute Tool on Payments DB]
-    Exec --> Payments
-    Exec -->|Record Execution| Audit
+    GateChecks -->|Allow| Exec[Run the Tool]
+    GateChecks -->|Deny / Needs Approval| Queue[Approvals Queue / Suspended]
     
-    Gate -->|Blocked / Requires 2nd Approver| Suspend[Suspend & Flag Event]
-    Suspend -->|Log Reason| Audit
+    Exec --> Audit[(audit_events\nAppend-Only & Hash-Chained)]
+    Queue --> Audit
     
-    Audit --> ChangeStreams
-    ChangeStreams -->|Live Feed| ReviewerUI([Compliance / Approver UI])
-    ReviewerUI -->|2nd Approver Sign-off| Gate
+    Audit --> Stream[Atlas Change Streams]
+    Stream --> AuditorUI([Auditor UI: Timeline + Vector Search + Tamper Check])
+    AuditorUI -->|Supervisor Override / Approval| Gate
 ```
 
-### MongoDB Collections Design
+---
 
-| Collection | Purpose | Sample Fields |
+## 3. MongoDB Collections Design & Key Fields
+
+| Collection | Purpose | Key Fields |
 | :--- | :--- | :--- |
-| `identities` | Agents, operators, roles, and active delegation | `id`, `name`, `type` (`agent` \| `human`), `role` (`l1_analyst`, `lead_operator`), `delegated_to`, `active` |
-| `policies` | JSON-driven deterministic rules enforced pre-execution | `policy_id`, `action`, `resource`, `conditions` (`amount_max`, `required_approvals`), `effect` (`ALLOW`, `DENY`, `REQUIRE_APPROVAL`) |
+| `identities` | Agents, operators, roles, and delegations | `id`, `type` (`human` \| `agent`), `role`, `on_behalf_of`, `limits` |
+| `policies` | Casbin policy rules stored natively via `casbin-pymongo-adapter` | `ptype` (p/g), `v0` (sub/role), `v1` (obj/resource), `v2` (act/action), `v3` (eft/condition), `v4` (extra rules) |
 | `payments` | Operational payment records and exception states | `payment_id`, `amount`, `currency`, `sender`, `beneficiary`, `status` (`FLAGGED_EXCEPTION`, `HELD`, `RELEASED`), `risk_tier` |
 | `audit_events` | Append-only ledger with cryptographic hash chaining | `event_id`, `timestamp`, `trace_id`, `identity_id`, `action`, `tool_name`, `input_args`, `policy_decision`, `reasoning`, `prev_hash`, `hash` |
 
 ---
 
-## 3. Key Atlas Features Utilized
+## 4. Key Atlas Features Utilized
 
 1. **Atlas Change Streams:**
    - Powers real-time streaming to the compliance / second-approver interface.
@@ -76,32 +95,45 @@ flowchart TD
 
 ---
 
-## 4. Agent Tools & Pre-Execution Policy Logic
+## 5. Agent Tools & Pre-Execution Policy Logic
 
 The agent is equipped with standard operational tools, but **cannot invoke them directly without the Atlas policy interceptor**:
 
 ```python
-# Interceptor Pattern Example
+# Interceptor Pattern Example with Casbin & Atlas
+import casbin
+from casbin_pymongo_adapter import Adapter
+
+def get_enforcer():
+    adapter = Adapter("mongodb+srv://...", "transactions_monitor")
+    # Loads model and policies dynamically from Atlas
+    return casbin.Enforcer("rbac_with_domains_model.conf", adapter)
+
 def execute_agent_tool(tool_name: str, args: dict, operator_identity: str):
-    # 1. Resolve Identity and Delegated Permissions
+    # 1. Resolve Identity and Delegated Permissions from Atlas
     identity = db.identities.find_one({"id": operator_identity})
     
-    # 2. Query Policies in Atlas
-    policy = evaluate_policy(tool_name, args, identity)
+    # 2. Evaluate Policy via Casbin Enforcer
+    enforcer = get_enforcer()
+    sub = identity.get("role")
+    obj = tool_name
+    act = args.get("action_type", "execute")
     
-    if policy.decision == "DENY":
-        log_audit_event(status="BLOCKED", reason=policy.reason)
-        return {"error": f"Policy Violation: {policy.reason}"}
+    if not enforcer.enforce(sub, obj, act):
+        log_audit_event(status="BLOCKED", identity=identity, tool=tool_name, args=args)
+        return {"error": f"Policy Violation: {sub} is not authorized for {obj}:{act}"}
         
-    if policy.decision == "REQUIRE_APPROVAL":
-        log_audit_event(status="AWAITING_APPROVAL", approvers_needed=2)
-        return {"status": "HOLD", "message": "Triggered multi-approver requirement."}
+    # Check conditional limits (e.g. monetary threshold)
+    amount = args.get("amount", 0)
+    if amount > identity.get("limits", {}).get("max_auto_release", 10000):
+        log_audit_event(status="AWAITING_APPROVAL", identity=identity, tool=tool_name, args=args)
+        return {"status": "HOLD", "message": f"Amount ${amount} exceeds limit. Sent to approvals queue."}
         
     # 3. Execute Tool
     result = tools[tool_name](**args)
     
     # 4. Record Hash-Chained Audit Record
-    log_audit_event(status="EXECUTED", result=result)
+    log_audit_event(status="EXECUTED", identity=identity, tool=tool_name, args=args, result=result)
     return result
 ```
 
@@ -113,7 +145,7 @@ def execute_agent_tool(tool_name: str, args: dict, operator_identity: str):
 
 ---
 
-## 5. Live Demo Flow (5-Minute Script)
+## 6. Live Demo Flow (5-Minute Script)
 
 1. **Step 1: Task Delegation & Investigation (Allowed)**
    - *Action:* Operator prompts: *"Investigate exception #PAY-10492 and resolve it."*
@@ -132,7 +164,7 @@ def execute_agent_tool(tool_name: str, args: dict, operator_identity: str):
 
 ---
 
-## 6. Implementation Stack & Rules Compliance
+## 7. Implementation Stack & Rules Compliance
 
 ### Recommended Tech Stack:
 * **Backend:** Python (FastAPI / LangGraph / LangChain tool calling) or Node.js (TypeScript).

@@ -22,31 +22,32 @@ Financial operations teams handle high volumes of payment exceptions (e.g., sanc
 
 ```mermaid
 flowchart TD
-    User([Human Operator]) -->|Delegates Task| Agent([LLM Agent])
-    Agent -->|1. Proposes Tool Call| Gate[Atlas Policy Interceptor]
+    Operator([Operator / Identity]) -->|Delegates Task| Agent([Agent: LLM + Tools])
+    Agent -->|Every Tool Call| Gate[Policy Gate: Casbin + Atlas]
     
-    subgraph MongoDB_Atlas [MongoDB Atlas Governance Layer]
-        Identities[(identities)]
-        Policies[(policies)]
-        Payments[(payments)]
-        Audit[(audit_events\nHash-Chained & Immutable)]
-        ChangeStreams[Atlas Change Streams]
+    subgraph GateChecks ["Policy Gate Checks"]
+        C1["1. Who? (identities collection)"]
+        C2["2. Allowed? (policies via casbin-pymongo-adapter)"]
+        C3["3. Log Decision (audit_events)"]
     end
-
-    Gate -->|Verify Authority| Identities
-    Gate -->|Evaluate Rules| Policies
+    Gate --> GateChecks
     
-    Gate -->|Allowed| Exec[Execute Tool on Payments DB]
-    Exec --> Payments
-    Exec -->|Record Execution| Audit
+    GateChecks -->|Allow| Exec[Run the Tool]
+    GateChecks -->|Deny / Needs Approval| Queue[Approvals Queue / Suspended]
     
-    Gate -->|Blocked / Requires Approver| Suspend[Suspend & Flag Event]
-    Suspend -->|Log Reason| Audit
+    Exec --> Audit[(audit_events\nAppend-Only & Hash-Chained)]
+    Queue --> Audit
     
-    Audit --> ChangeStreams
-    ChangeStreams -->|Live Feed| ReviewerUI([Compliance / Approver UI])
-    ReviewerUI -->|Sign-off| Gate
+    Audit --> Stream[Atlas Change Streams]
+    Stream --> AuditorUI([Auditor UI: Timeline + Vector Search + Tamper Check])
+    AuditorUI -->|Supervisor Override / Approval| Gate
 ```
+
+### Policy Engine Selection: Casbin + MongoDB Adapter
+To keep MongoDB Atlas at the core as the identity, policy, and audit layer:
+- **Engine:** [Casbin](https://casbin.org/) with native [`casbin-pymongo-adapter`](https://github.com/pycasbin/pymongo-adapter).
+- **Storage:** Policies reside directly in an Atlas collection (`policies`), allowing instant rule updates without deploying code or maintaining separate policy servers.
+- **Enforcement:** Supports RBAC and ABAC rules (roles, resource permissions, amount limits, and dual-approver thresholds) evaluated pre-execution.
 
 ---
 
