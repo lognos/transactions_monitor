@@ -274,7 +274,7 @@ export function ReferencesDialog({ open, loading, error, references, principals 
             <h3 className="flex items-center gap-2 text-lg font-medium"><Sparkles className="size-5 text-status-positive-fg" aria-hidden="true" />Learned adjustments</h3>
             {references.adjustments.length === 0 ? <p className="mt-2 text-text-muted">No learned adjustments were used for this check.</p> : <ul className="mt-3 space-y-3">
               {references.adjustments.map((adjustment) => <li key={adjustment.memory_id} className="rounded-lg border-2 border-status-positive-border bg-status-positive-bg p-4">
-                <p className="text-lg font-medium text-status-positive-fg">Learned from {adjustment.author_name ?? adjustment.author_id}</p>
+                <p className="text-lg font-medium text-status-positive-fg">Learned from {principals.find((person) => person._id === adjustment.author_id)?.name ?? adjustment.author_name ?? adjustment.author_id}</p>
                 <p className="mt-2 text-lg">{adjustment.text}</p>
                 {adjustment.condition && <p className="mt-3 text-text-muted">Applies when: {adjustment.condition}</p>}
                 <p className="mt-3 text-sm text-text-muted">From <span className="font-mono">{adjustment.source_txn_id}</span> · {timestamp(adjustment.created_at)} (Toronto)</p>
@@ -287,7 +287,7 @@ export function ReferencesDialog({ open, loading, error, references, principals 
             {references.precedents.length === 0 ? <p className="mt-2 text-text-muted">No previous decisions were used as precedents for this check.</p> : <ul className="mt-3 space-y-3">
               {references.precedents.map((precedent) => <li key={precedent.memory_id} className="rounded-lg border border-border-subtle p-4">
                 <p>{precedent.text}</p>
-                <p className="mt-2 text-sm text-text-muted">{precedent.author_id === "seed" ? "Seeded precedent" : `Reviewed by ${precedent.author_name ?? precedent.author_id}`}{precedent.verdict ? ` · ${verdictText[precedent.verdict]}` : ""}</p>
+                <p className="mt-2 text-sm text-text-muted">{precedent.author_id === "seed" ? "Seeded precedent" : `Reviewed by ${principals.find((person) => person._id === precedent.author_id)?.name ?? precedent.author_name ?? precedent.author_id}`}{precedent.verdict ? ` · ${verdictText[precedent.verdict]}` : ""}</p>
                 <p className="mt-1 text-sm text-text-muted">{precedent.source_txn_id ? `${precedent.source_txn_id} · ` : ""}{timestamp(precedent.created_at)} (Toronto)</p>
                 <p className="mt-1 font-mono text-xs text-text-subtle">{precedent.memory_id}</p>
               </li>)}

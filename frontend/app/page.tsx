@@ -57,7 +57,10 @@ export default function Home() {
 
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const principals = useQuery({ queryKey: ["principals"], queryFn: api.principals });
-  const people = principals.data?.principals.filter((person) => person.type === "human") ?? [];
+  // Display alias only: API requests and stored audit identities still use "ana".
+  const people = principals.data?.principals
+    .filter((person) => person.type === "human")
+    .map((person) => person._id === "ana" ? { ...person, name: "Tixa" } : person) ?? [];
   const queue = useQuery({ queryKey: ["transactions"], queryFn: () => api.transactions(), enabled: Boolean(principals.data && principalId) });
   const transactions = queue.data?.transactions ?? [];
   const focusedTxn = transactions.find((txn) => txn.txn_id === focusedTxnId);
