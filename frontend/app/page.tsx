@@ -10,7 +10,7 @@ import { MicrosoftLogo, TsxMark } from "@/components/tsx-mark";
 import { Badge, Button } from "@/components/ui";
 import { api, getApiMode, setPrincipal } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import type { Evaluation, MemoryItem, Recommendation, TransactionSummary, Verdict } from "@/lib/types";
+import type { CheckResult, Evaluation, MemoryItem, Recommendation, TransactionSummary, Verdict } from "@/lib/types";
 
 const statusLabels = { pending: "Pending", awaiting_review: "Awaiting review", passed: "Passed", rejected: "Rejected" };
 const recommendationLabel = (value: Recommendation) => value === "pass" ? "PASS" : "NO-PASS";
@@ -33,9 +33,12 @@ export default function Home() {
   const [changedRows, setChangedRows] = useState<Record<string, ChangedRow>>({});
   const [adjustments, setAdjustments] = useState<MemoryItem[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [focusInputSignal, setFocusInputSignal] = useState(0);
   const [chatWidth, setChatWidth] = useState(34);
   const [resizing, setResizing] = useState(false);
   const splitPane = useRef<HTMLElement>(null);
+  const hydratedEvalIds = useRef(new Set<string>());
   const autoAttempted = useRef(new Set<string>());
   const queueRunning = useRef(false);
 
@@ -63,6 +66,35 @@ export default function Home() {
   const focusedTxn = transactions.find((txn) => txn.txn_id === focusedTxnId);
   const evalId = focusedTxn?.eval_id;
   const evaluation = useQuery({ queryKey: ["evaluation", evalId], queryFn: () => api.evaluation(evalId!), enabled: Boolean(evalId) });
+
+  useEffect(() => {
+    const data = evaluation.data;
+    if (!data || !data.thread.length || hydratedEvalIds.current.has(data.eval_id)) return;
+    hydratedEvalIds.current.add(data.eval_id);
+    const knownPeople = principals.data?.principals ?? [];
+    setMessages((previous) => {
+      if (previous.some((m) => m.evaluationId === data.eval_id)) return previous;
+      const restored: ChatMessage[] = data.thread.flatMap((turn, index) => [
+        {
+          id: `${data.eval_id}-q-${index}`,
+          role: "user",
+          text: turn.question,
+          txnId: data.txn_id,
+          evaluationId: data.eval_id,
+          author: knownPeople.find((p) => p._id === turn.asked_by)?.name ?? turn.asked_by,
+        },
+        {
+          id: `${data.eval_id}-a-${index}`,
+          role: "agent",
+          text: turn.answer,
+          citations: turn.citations,
+          txnId: data.txn_id,
+          evaluationId: data.eval_id,
+        },
+      ]);
+      return [...previous, ...restored];
+    });
+  }, [evaluation.data, principals.data?.principals]);
   const references = useQuery({
     queryKey: ["references", reference?.evalId, reference?.criterionId],
     queryFn: () => api.references(reference!.evalId, reference!.criterionId), enabled: Boolean(reference),
@@ -193,6 +225,11 @@ export default function Home() {
   function openReferences(criterionId: string) {
     if (evalId && evaluation.data?.checks.some((check) => check.criterion_id === criterionId)) setReference({ evalId, criterionId });
   }
+  function askAboutCheck(criterionId: string, description: string, result: CheckResult) {
+    const outcome = result === "no_pass" ? "fail" : result === "flag" ? "get flagged" : "pass";
+    setChatDraft(`Why did ${criterionId} (${description}) ${outcome}?`);
+    setFocusInputSignal((n) => n + 1);
+  }
   function sendMessage(text: string) {
     if (chat.isPending || (focusedTxnId && !evalId)) return;
     setMessages((previous) => [...previous, {
@@ -264,7 +301,8 @@ export default function Home() {
         className={cn("grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(300px,var(--chat-width))_10px_minmax(420px,1fr)]", resizing && "cursor-col-resize select-none")}>
         <ChatPanel messages={messages} focus={focusedTxnId ? { txnId: focusedTxnId, evaluationId: evalId ?? undefined, criterionIds: evaluation.data?.checks.map((check) => check.criterion_id) ?? [] } : null}
           busy={chat.isPending} disabled={!principals.data || Boolean(focusedTxnId && (!evalId || loadingRows.includes(focusedTxnId)))} error={chat.error?.message}
-          onClearFocus={() => { setFocusedTxnId(null); if (!chat.isPending) chat.reset(); }} onSend={sendMessage} onCitation={openReferences} />
+          draft={chatDraft} onDraftChange={setChatDraft} focusInputSignal={focusInputSignal}
+          onClearFocus={() => { setFocusedTxnId(null); if (!chat.isPending) chat.reset(); }} onSend={sendMessage} onTranscribe={api.transcribeAudio} onCitation={openReferences} />
         <div role="separator" aria-label="Resize chat and artifacts panes" aria-orientation="vertical" aria-controls="chat-pane artifacts-pane"
           aria-valuenow={Math.round(chatWidth)} aria-valuemin={0} aria-valuemax={100} aria-valuetext={`Chat width ${Math.round(chatWidth)} percent`}
           tabIndex={0} title="Drag to resize · Arrow keys to adjust · Double-click to reset"
@@ -361,7 +399,7 @@ export default function Home() {
            {detailsOpen && <TransactionDetails evaluation={evaluation.data} loading={Boolean(evalId) && evaluation.isPending}
              error={evaluation.error?.message ?? (!evalId ? "This transaction has no evaluation yet. Use Evaluate queue to retry." : null)}
              busy={decision.isPending} decisionError={decision.error?.message} principals={people}
-             onClose={() => setChecksOpen(false)} onReferences={openReferences} onDecide={(verdict, comments) => { if (evalId) decision.mutate({ evaluationId: evalId, verdict, comments }); }} />}
+             onClose={() => setChecksOpen(false)} onReferences={openReferences} onAskCheck={askAboutCheck} onDecide={(verdict, comments) => { if (evalId) decision.mutate({ evaluationId: evalId, verdict, comments }); }} />}
           </div> : <div id="audit-panel" role="tabpanel" aria-labelledby="audit-tab" className="min-h-0 flex-1 overflow-y-auto p-5">
             <AuditPanel events={audit.data?.events ?? []} loading={audit.isLoading} error={audit.error?.message ?? verify.error?.message} focusTxnId={focusedTxnId}
               verification={verify.data} verifying={verify.isPending} onVerify={() => verify.mutate()} principals={people} />

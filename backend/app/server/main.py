@@ -6,10 +6,12 @@ answers or decides goes through app.agent (run_evaluate, run_review, run_chat).
 
 import asyncio
 import inspect
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI
+import httpx
+from fastapi import Depends, FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import agent
@@ -227,6 +229,55 @@ async def chat(body: ChatBody, principal: dict = Principal) -> dict[str, Any]:
         "answer": result["answer"],
         "citations": await label_citations(result["citations"]),
     })
+
+
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+
+@app.post("/speech/transcribe")
+async def transcribe_speech(
+    file: UploadFile = File(...),
+    _: dict = Principal,
+) -> dict[str, Any]:
+    api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    if not api_key:
+        raise ApiError(503, "speech_unconfigured", "ElevenLabs speech-to-text is not configured.")
+
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise ApiError(422, "invalid_request", "Recorded audio is empty.")
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise ApiError(413, "invalid_request", "Audio recording exceeds the 10 MB limit.")
+
+    model_id = os.getenv("ELEVENLABS_STT_MODEL_ID", "").strip() or "scribe_v1"
+    content_type = file.content_type or "audio/webm"
+    filename = file.filename or "recording.webm"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.elevenlabs.io/v1/speech-to-text",
+                headers={"xi-api-key": api_key},
+                data={"model_id": model_id},
+                files={"file": (filename, audio_bytes, content_type)},
+            )
+    except httpx.HTTPError as exc:
+        raise ApiError(
+            502,
+            "speech_failed",
+            f"Could not reach ElevenLabs speech-to-text ({type(exc).__name__}).",
+        ) from exc
+
+    if response.status_code >= 400:
+        raise ApiError(
+            502,
+            "speech_failed",
+            f"ElevenLabs speech-to-text returned status {response.status_code}.",
+        )
+
+    payload = response.json()
+    text = (payload.get("text") or "").strip()
+    return public_data({"text": text})
 
 
 @app.post("/evaluations/{eval_id}/ask")

@@ -33,7 +33,7 @@ type ApiSource = "fixture" | "backend";
 const defaultSource: ApiSource = process.env.NEXT_PUBLIC_API_SOURCE === "fixture" ? "fixture" : "backend";
 export const apiSources: Record<
   "health" | "principals" | "transactions" | "evaluate" | "evaluation" | "ask" |
-  "decide" | "audit" | "verifyChain" | "evaluatePending" | "simulate" | "references" | "chat",
+  "decide" | "audit" | "verifyChain" | "evaluatePending" | "simulate" | "references" | "chat" | "transcribe",
   ApiSource
 > = {
   health: defaultSource,
@@ -49,6 +49,7 @@ export const apiSources: Record<
   simulate: defaultSource,
   references: defaultSource,
   chat: defaultSource,
+  transcribe: defaultSource,
 };
 
 export function getApiMode(): "fixtures" | "backend" | "mixed" {
@@ -89,6 +90,15 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
   return data as T;
 }
 
+async function requestForm<T>(path: string, formData: FormData): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (principalId) headers["X-Principal-Id"] = principalId;
+  const res = await fetch(`/api${path}`, { method: "POST", headers, body: formData });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new ApiError(res.status, data);
+  return data as T;
+}
+
 async function call<T>(name: keyof typeof apiSources, fixture: () => Promise<T>, backend: () => Promise<T>): Promise<T> {
   try {
     return await (apiSources[name] === "fixture" ? fixture() : backend());
@@ -120,6 +130,16 @@ export const api = {
   ask: (evalId: string, question: string) =>
     call("ask", () => fixtures.ask(evalId, principalId, question), () => request<AskResponse>("POST", `/evaluations/${pathId(evalId)}/ask`, { question })),
   chat: (message: string) => call("chat", () => fixtures.chat(principalId, message), () => request<ChatResponse>("POST", "/chat", { message })),
+  transcribeAudio: (audio: Blob) => call(
+    "transcribe",
+    async () => ({ text: "Why did C-04 fail?" }),
+    () => {
+      const form = new FormData();
+      const ext = audio.type.includes("mp4") ? "mp4" : audio.type.includes("ogg") ? "ogg" : "webm";
+      form.append("file", audio, `recording.${ext}`);
+      return requestForm<{ text: string }>("/speech/transcribe", form);
+    },
+  ),
   decide: (evalId: string, verdict: Verdict, comments?: string) =>
     call("decide", () => fixtures.decide(evalId, principalId, verdict, comments), () =>
       request<DecideResponse>("POST", `/evaluations/${pathId(evalId)}/decide`, { verdict, comments })),

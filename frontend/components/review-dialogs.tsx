@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useState } from "react";
-import { BookOpen, LoaderCircle, Sparkles, X } from "lucide-react";
+import { BookOpen, LoaderCircle, MessageSquare, Sparkles, X } from "lucide-react";
 import { Badge, Button, Dialog, type BadgeTone } from "@/components/ui";
 import type { CheckResult, Evaluation, Principal, ReferencesResponse, Verdict } from "@/lib/types";
 
@@ -37,6 +37,7 @@ export interface TransactionDetailsProps {
   principals: Principal[];
   onClose: () => void;
   onReferences: (criterionId: string) => void;
+  onAskCheck?: (criterionId: string, description: string, result: CheckResult) => void;
   onDecide: (verdict: Verdict, comments?: string) => void;
 }
 
@@ -60,7 +61,7 @@ export function TransactionDetails(props: TransactionDetailsProps) {
   );
 }
 
-function CheckDetails({ evaluation, busy, decisionError, principals, onReferences, onDecide }: TransactionDetailsProps & { evaluation: Evaluation }) {
+function CheckDetails({ evaluation, busy, decisionError, principals, onReferences, onAskCheck, onDecide }: TransactionDetailsProps & { evaluation: Evaluation }) {
   const [commentAction, setCommentAction] = useState<"validated_with_comments" | "rejected" | null>(null);
   const [comments, setComments] = useState("");
   const commentsId = useId();
@@ -99,6 +100,17 @@ function CheckDetails({ evaluation, busy, decisionError, principals, onReference
                 >
                   <Badge tone={resultTone[check.result]} className="gap-2 px-3 py-1 text-sm hover:opacity-80">{resultText[check.result]}<BookOpen className="size-3.5" aria-hidden="true" /></Badge>
                 </button>
+                {onAskCheck && (
+                  <button
+                    type="button"
+                    onClick={() => onAskCheck(check.criterion_id, check.description, check.result)}
+                    aria-label={`Ask agent about ${check.criterion_id}`}
+                    title={`Ask agent about ${check.criterion_id}`}
+                    className="rounded-md border border-border-subtle bg-surface-2/50 p-1.5 text-text-muted transition-colors hover:border-border-default hover:bg-surface-3 hover:text-text-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus"
+                  >
+                    <MessageSquare className="size-3.5" aria-hidden="true" />
+                  </button>
+                )}
                 {check.adjustments_used.length > 0 && <Badge tone="positive" icon={Sparkles} className="text-sm">learned</Badge>}
               </div>
               <p className="mt-0.5 break-words text-sm text-text-muted">{check.evidence}</p>
