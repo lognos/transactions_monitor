@@ -7,6 +7,8 @@ rehearsal always starts clean. All data here is written at the event.
 """
 
 import asyncio
+import json
+from pathlib import Path
 
 from app.db import close_client, get_db
 from app.db.audit import GENESIS_HASH
@@ -14,7 +16,8 @@ from app.db.audit import GENESIS_HASH
 PRINCIPALS: list[dict] = []  # TODO(scenarios)
 CUSTOMERS: list[dict] = []  # TODO(scenarios)
 TRANSACTIONS: list[dict] = []  # TODO(scenarios)
-POLICIES: list[dict] = []  # TODO(scenarios)
+POLICY_FILE = Path(__file__).resolve().parents[2] / "data" / "hackathon_policies.json"
+POLICIES: list[dict] = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
 PRECEDENTS: list[dict] = []  # TODO(scenarios): memory docs, kind "precedent", author_id "seed"
 
 SEED = {
