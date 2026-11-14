@@ -308,9 +308,11 @@ export default function Home() {
 
       {!principalId ? <div className="flex flex-1 items-center justify-center p-6">
         <section aria-labelledby="login-title" className="flex w-full max-w-sm flex-col items-center gap-8">
-          <div className="flex w-full items-center justify-between gap-4">
+          <div className="flex w-full items-center gap-6">
             <AuditFlowMark className="size-16 sm:size-20" />
-            <span className="whitespace-nowrap text-4xl font-medium tracking-tight sm:text-5xl">auditflow ai</span>
+            <span role="img" aria-label="auditflow ai" className="flex min-w-0 flex-1 justify-between whitespace-pre text-4xl font-extralight sm:text-5xl" style={{ fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+              {Array.from("auditflow ai").map((character, index) => <span key={index} aria-hidden="true">{character}</span>)}
+            </span>
           </div>
           <h2 id="login-title" className="sr-only">Sign in</h2>
           {principals.isPending && <p role="status" className="flex items-center gap-2 text-sm text-text-muted"><LoaderCircle className="size-4 animate-spin" aria-hidden="true" />Loading…</p>}

@@ -10,8 +10,8 @@ export function AuditFlowMark({ className }: { className?: string }) {
       className={cn("size-9 shrink-0 text-text-default", className)}
       fill="currentColor"
     >
-      <circle cx="33" cy="48" r="30" fill="none" stroke="currentColor" strokeWidth="5" />
-      <circle cx="63" cy="48" r="30" fill="none" stroke="currentColor" strokeWidth="5" />
+      <circle cx="33" cy="48" r="30" fill="none" stroke="currentColor" strokeWidth="2" />
+      <circle cx="63" cy="48" r="30" fill="none" stroke="currentColor" strokeWidth="2" />
       <path d="M48 22.02a30 30 0 0 1 0 51.96 30 30 0 0 1 0-51.96Z" />
     </svg>
   );
