@@ -25,18 +25,16 @@ class Citation(BaseModel):
 
 
 class OverrideAction(BaseModel):
-    """A reviewer's chat request to change one check. Code applies it, never the model."""
-
     type: Literal["override_check"]
     criterion_id: str
-    result: Literal["pass", "flag", "no_pass"]
-    reason: str | None = None
+    result: Literal["pass", "flag", "no_pass"] | None
+    reason: str = ""
 
 
 class AnswerOutput(BaseModel):
     answer: str
-    citations: list[Citation] = Field(default_factory=list)
     action: OverrideAction | None = None
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class LearnOutput(BaseModel):
@@ -44,3 +42,9 @@ class LearnOutput(BaseModel):
     criterion_id: str | None = None
     condition: str | None = None
     text: str | None = None
+
+
+class OverrideGuidance(BaseModel):
+    """The criterion is fixed by code; the model only supplies scoped wording."""
+    condition: str = Field(min_length=1)
+    text: str = Field(min_length=1)

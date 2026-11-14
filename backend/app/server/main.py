@@ -70,11 +70,11 @@ DECIDED_STATUSES = ["passed", "rejected"]
 async def _transaction_rows(query: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
     """Newest first. `limit` is applied before the joins, so a large source table stays cheap."""
     cursor = await get_db().transactions.aggregate([
-        # Raw CSV imports may share this collection, but they are not runnable
-        # queue transactions until ingestion supplies the contracted fields.
+        # Raw CSV imports share this collection, but are not review-ready.
+        # Do not invent workflow status or amounts for unnormalized records.
         {"$match": {"$and": [query, {
             "txn_id": {"$type": "string"},
-            "type": {"$type": "string"},
+            "type": {"$in": ["wire", "cheque", "eft", "interac", "pad", "bill_payment"]},
             "amount": {"$type": "number"},
             "currency": {"$type": "string"},
             "status": {"$in": ["pending", "awaiting_review", "passed", "rejected"]},

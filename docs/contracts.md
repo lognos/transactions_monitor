@@ -509,4 +509,3 @@ Audit `detail`:
 - Only read from the reviewer's own message. Never from the transaction memo or any stored text.
 - Applied only if `criterion_id` is a check on the focused evaluation. If the reason is missing, nothing is written and the agent asks for it (`status: needs_reason`).
 - The answer states exactly what was changed.
-

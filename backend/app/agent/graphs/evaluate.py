@@ -71,6 +71,7 @@ class EvalState(TypedDict, total=False):
     adjustments: List[Dict[str, Any]]
     llm_output: Dict[str, Any]
     evaluation: Dict[str, Any]
+    previous_evaluation: Dict[str, Any] | None
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,15 @@ async def load(state: EvalState) -> Dict[str, Any]:
     if not customer:
         raise KeyError(f"Customer not found: {txn['customer_id']}")
 
+    existing = None
+    if state.get("refresh"):
+        existing = await db["evaluations"].find_one(
+            {"txn_id": txn_id, "status": "awaiting_review"}, {"_id": 0},
+            sort=[("created_at", -1), ("eval_id", -1)],
+        )
+        if existing and any(c.get("override") is not None for c in existing.get("checks", [])):
+            return {"txn": txn, "customer": customer, "evaluation": existing}
+
     policy = await db["policies"].find_one(
         {"txn_type": txn["type"], "active": True}, {"_id": 0}
     )
@@ -101,7 +111,7 @@ async def load(state: EvalState) -> Dict[str, Any]:
     if not policy:
         raise KeyError(f"No active policy for txn_type={txn['type']}")
 
-    return {"txn": txn, "customer": customer, "policy": policy}
+    return {"txn": txn, "customer": customer, "policy": policy, "previous_evaluation": existing}
 
 
 async def run_checks(state: EvalState) -> Dict[str, Any]:
@@ -359,15 +369,29 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         "created_at": now,
     }
 
-    # Exactly one live evaluation per transaction: any earlier undecided one is
-    # superseded, whether this run is a refresh or a re-evaluation of a re-queued item.
-    writes = [
+    # Exactly one live evaluation per transaction.
+    # - On a refresh, the evaluation this run started from is superseded only if it
+    #   is unchanged (no override was made meanwhile); otherwise the write aborts.
+    # - Any other undecided evaluation left behind by a re-queued transaction is
+    #   superseded too.
+    writes = []
+    previous = state.get("previous_evaluation")
+    stale_filter: Dict[str, Any] = {"txn_id": txn["txn_id"], "status": "awaiting_review"}
+    if refresh and previous:
+        writes.append(
+            make_update(
+                "evaluations",
+                {"eval_id": previous["eval_id"], "status": "awaiting_review", "checks": previous["checks"]},
+                {"$set": {"status": "superseded"}},
+            )
+        )
+        stale_filter["eval_id"] = {"$ne": previous["eval_id"]}
+    writes.append(
         Write(
             collection="evaluations", op="update_many",
-            filter={"txn_id": txn["txn_id"], "status": "awaiting_review"},
-            update={"$set": {"status": "superseded"}},
+            filter=stale_filter, update={"$set": {"status": "superseded"}},
         )
-    ]
+    )
     writes.extend([
         make_insert("evaluations", evaluation_doc),
         make_update(
@@ -410,7 +434,9 @@ def build_evaluate_graph():
     builder.add_node("save_evaluation", save_evaluation)
 
     builder.add_edge(START, "load")
-    builder.add_edge("load", "run_checks")
+    builder.add_conditional_edges(
+        "load", lambda state: END if state.get("evaluation") else "run_checks", [END, "run_checks"]
+    )
     builder.add_edge("run_checks", "retrieve_context")
     builder.add_edge("retrieve_context", "recommend")
     builder.add_edge("recommend", "save_evaluation")

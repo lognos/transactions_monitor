@@ -401,15 +401,16 @@ export default function Home() {
               {transactions.map((txn) => {
                 const loading = loadingRows.includes(txn.txn_id);
                 const changed = changedRows[txn.txn_id];
+                const incomplete = typeof txn.type !== "string" || !Number.isFinite(txn.amount) || !txn.status;
                 return <li key={txn.txn_id}>
-                  <button type="button" disabled={loading || decision.isPending || override.isPending} onClick={() => openTransaction(txn)} aria-busy={loading}
+                  <button type="button" disabled={incomplete || loading || decision.isPending || override.isPending} onClick={() => openTransaction(txn)} aria-busy={loading}
                     aria-expanded={detailsOpen && focusedTxnId === txn.txn_id}
                     className={cn("grid w-full grid-cols-[6.75rem_4.75rem_minmax(0,1fr)_auto_10.5rem] items-center gap-3 rounded-md border px-3 py-1.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus disabled:cursor-wait",
                       changed ? "border-2 border-status-positive-border bg-status-positive-bg" : txn.override_count > 0 ? "border-status-info-border bg-status-info-bg" : focusedTxnId === txn.txn_id ? "border-accent bg-accent-subtle" : "border-border-subtle bg-surface-1 hover:bg-surface-2")}>
                     <span className="truncate font-mono text-xs font-medium">{txn.txn_id}</span>
-                    <span className="truncate text-xs text-text-muted capitalize">{txn.type.replace("_", " ")}</span>
-                    <span className="truncate">{txn.customer_name}<span className="ml-2 text-xs text-text-subtle">{statusLabels[txn.status]}</span></span>
-                    <span className="font-medium">{txn.currency} {txn.amount.toLocaleString("en-CA")}</span>
+                    <span className="truncate text-xs text-text-muted capitalize">{typeof txn.type === "string" ? txn.type.replaceAll("_", " ") : "Unknown type"}</span>
+                    <span className="truncate">{txn.customer_name}<span className="ml-2 text-xs text-text-subtle">{incomplete ? "Incomplete transaction" : statusLabels[txn.status]}</span></span>
+                    <span className="font-medium">{Number.isFinite(txn.amount) ? `${txn.currency} ${txn.amount.toLocaleString("en-CA")}` : "Amount unavailable"}</span>
                     <span className="flex flex-col items-end gap-1">
                       {loading ? <span role="status" className="flex items-center gap-1.5 text-xs text-accent-fg"><LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />Evaluating…</span> : txn.effective_recommendation ? <>
                         <span className="flex items-center gap-2"><span className="text-xs text-text-muted">{changed ? "changed · " : ""}{txn.failed_checks.length} failed</span>

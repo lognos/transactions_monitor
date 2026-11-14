@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
+load_dotenv(REPO_ROOT / "backend" / ".env")
 
 
 def _require(*names: str) -> str:
@@ -18,6 +19,10 @@ def _require(*names: str) -> str:
 
 
 class Settings:
+    @property
+    def mongodb_configured(self) -> bool:
+        return bool(os.getenv("MONGODB_URI") or os.getenv("MONGODB_CONNECTION_STRING"))
+
     @property
     def mongodb_uri(self) -> str:
         return _require("MONGODB_URI", "MONGODB_CONNECTION_STRING")

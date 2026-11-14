@@ -91,8 +91,14 @@ async def write_with_audit(
             elif w.op in ("update", "update_many"):
                 if w.filter is None or w.update is None:
                     raise ValueError(f"Update write on {w.collection} missing filter/update")
-                apply = col.update_many if w.op == "update_many" else col.update_one
-                await apply(w.filter, w.update, session=session)
+                if w.op == "update_many":
+                    await col.update_many(w.filter, w.update, session=session)
+                else:
+                    # A single-document update must hit its document, or the whole
+                    # audited transaction aborts (guards against concurrent changes).
+                    result = await col.update_one(w.filter, w.update, session=session)
+                    if result.matched_count != 1:
+                        raise ValueError(f"Missing or changed document for audited update in {w.collection}")
             else:
                 raise ValueError(f"Unsupported write op: {w.op}")
 

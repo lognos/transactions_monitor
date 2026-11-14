@@ -29,12 +29,12 @@ async def check_gate(
     """
     db = get_db()
     txn_type = txn.get("type")
-    policy = await db.policies.find_one({"txn_type": txn_type, "active": True}, {"_id": 0})
+    policy = await db.policies.find_one({"txn_type": txn_type, "version": evaluation["policy_version"]}, {"_id": 0})
     if not policy:
         return {
             "result": "deny",
             "rule_id": None,
-            "reason": f"No active policy found for transaction type '{txn_type}'.",
+            "reason": f"Evaluation policy version not found for transaction type '{txn_type}'.",
         }
 
     role = principal.get("role")

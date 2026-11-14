@@ -31,6 +31,8 @@ def get_llm(model_override: Optional[str] = None) -> Any:
     if ":" in model_spec:
         from langchain.chat_models import init_chat_model
 
+        if model_spec == "openai:gpt-6-luna":
+            return init_chat_model(model_spec, use_responses_api=True, reasoning={"effort": "none"})
         return init_chat_model(model_spec, temperature=0)
 
     explicit = os.getenv("LLM_PROVIDER", "").strip().lower()
