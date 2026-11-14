@@ -87,6 +87,14 @@ async def load(state: EvalState) -> Dict[str, Any]:
     if not customer:
         raise KeyError(f"Customer not found: {txn['customer_id']}")
 
+    if state.get("refresh"):
+        existing = await db["evaluations"].find_one(
+            {"txn_id": txn_id, "status": "awaiting_review"}, {"_id": 0},
+            sort=[("created_at", -1), ("eval_id", -1)],
+        )
+        if existing and any(c.get("override") is not None for c in existing.get("checks", [])):
+            return {"txn": txn, "customer": customer, "evaluation": existing}
+
     policy = await db["policies"].find_one(
         {"txn_type": txn["type"], "active": True}, {"_id": 0}
     )
@@ -408,7 +416,9 @@ def build_evaluate_graph():
     builder.add_node("save_evaluation", save_evaluation)
 
     builder.add_edge(START, "load")
-    builder.add_edge("load", "run_checks")
+    builder.add_conditional_edges(
+        "load", lambda state: END if state.get("evaluation") else "run_checks", [END, "run_checks"]
+    )
     builder.add_edge("run_checks", "retrieve_context")
     builder.add_edge("retrieve_context", "recommend")
     builder.add_edge("recommend", "save_evaluation")

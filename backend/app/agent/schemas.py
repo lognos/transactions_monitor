@@ -42,3 +42,9 @@ class LearnOutput(BaseModel):
     criterion_id: str | None = None
     condition: str | None = None
     text: str | None = None
+
+
+class OverrideGuidance(BaseModel):
+    """The criterion is fixed by code; the model only supplies scoped wording."""
+    condition: str = Field(min_length=1)
+    text: str = Field(min_length=1)

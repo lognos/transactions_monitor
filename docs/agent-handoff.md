@@ -36,7 +36,7 @@ The frontend proxies `/api` to port 8010 unless `API_URL` overrides it. `app.mai
 
 ## Validation
 
-- 13 isolated review/gate tests pass, including an HTTP flow through blocked approval, override, question, and approval with mocked DB/model dependencies.
+- 18 isolated review/gate tests pass, including an HTTP flow through blocked approval, override, question, and approval with mocked DB/model dependencies.
 - 20 earlier policy/context tests pass.
 - Frontend lint, TypeScript, and fixture override scenarios pass. Production build passed after permitting Google Fonts downloads; lint and TypeScript were rerun after the small queue guard change.
 - Live checks confirmed the integrated API routes, MongoDB health, reviewer loading, and transaction-list schema through the frontend proxy.
@@ -63,3 +63,11 @@ npm run build
 Use fresh normalized test transactions to exercise evaluation → questions → override/revert → approve/reject → audit verification against Atlas and the real model. Confirm a judgment adjustment changes a subsequent similar evaluation and is cited. Full live learning and audit replay were not verified. Check existing policy documents for the intended hard-override permission; changing code defaults does not migrate stored policies.
 
 The imported simulator expects `backend/data/AuditFlow_All_Transactions_Consolidated.csv`, which was not present in this checkout. Restore the intended dataset or configure the ingestion path before testing simulation. Do not reset the shared database just to run the demo.
+
+## Follow-up alignment with Zach's override requirements
+
+- A missing chat override reason now returns `needs_reason` without writing a thread entry, audit event, or override.
+- Chat action extraction uses a separate model call containing only the current reviewer message and valid check IDs. The context-rich answer call cannot authorize writes. Ordinary questions therefore use two model calls.
+- Each judgment override uses an `OverrideGuidance` schema containing only condition and text; code fixes the criterion from the override. Hard overrides are excluded from the learning payload. Model failures still skip that adjustment and preserve the recorded decision.
+- Refresh protection also exists in the evaluation graph, so direct `run_evaluate(refresh=True)` calls preserve active overrides, not just HTTP requests.
+- Tests cover these cases, multiple judgment adjustments, no model call for panel overrides, and ignoring an action returned by the context-rich answer call.
