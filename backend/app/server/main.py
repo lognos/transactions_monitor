@@ -81,7 +81,7 @@ async def _transaction_rows(query: dict[str, Any], limit: int | None = None) -> 
             "created_at": {"$type": ["date", "string"]},
         }]}},
         {"$set": {"_queued": {"$ifNull": ["$queued_at", "$created_at"]}}},
-        {"$sort": {"_queued": -1, "txn_id": -1}},
+        {"$sort": {"_queued": -1, "created_at": -1, "txn_id": -1}},
         *([{"$limit": limit}] if limit else []),
         {"$lookup": {
             "from": "customers", "localField": "customer_id",
