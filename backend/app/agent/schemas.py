@@ -9,6 +9,7 @@ class JudgmentCheck(BaseModel):
     criterion_id: str
     result: Literal["pass", "no_pass"]
     evidence: str
+    explanation: str
     precedents_used: list[str] = Field(default_factory=list)
     adjustments_used: list[str] = Field(default_factory=list)
 

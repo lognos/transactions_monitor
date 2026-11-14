@@ -1,0 +1,14 @@
+{
+  "last_synced_at": "2026-11-14T17:34:30.791687+00:00",
+  "total_policies": 172,
+  "active_policies": 170,
+  "upcoming_policies": 0,
+  "expired_policies": 2,
+  "csv_path": "mongodb/data/fintrac_policy_monitoring_catalog.csv",
+  "vector_ingest_result": {
+    "status": "LIVE_SYNC_SUCCESS",
+    "active_policies": 170,
+    "expired_policies": 2,
+    "purged_policies": 0
+  }
+}

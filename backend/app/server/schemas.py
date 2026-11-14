@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class AskBody(BaseModel):
@@ -15,6 +15,12 @@ class ChatBody(BaseModel):
 
 class EvaluatePendingBody(BaseModel):
     refresh: bool = False
+
+
+class SimulateBody(BaseModel):
+    count: int = Field(default=3, ge=1, le=10)
+    mode: Literal["random", "signals", "sequential"] = "random"
+    policy_only: bool = False
 
 
 class DecideBody(BaseModel):

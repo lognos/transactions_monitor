@@ -1,7 +1,7 @@
 // Shapes from docs/contracts.md. Keep in sync with that file.
 
 export type Role = "analyst" | "supervisor" | "auditor" | "agent";
-export type TxnType = "wire" | "cheque";
+export type TxnType = "wire" | "cheque" | "eft" | "interac" | "pad" | "bill_payment";
 export type TxnStatus = "pending" | "awaiting_review" | "passed" | "rejected";
 export type CheckResult = "pass" | "no_pass" | "flag";
 export type Recommendation = "pass" | "no_pass";
@@ -209,6 +209,18 @@ export interface EvaluatePendingResponse {
     eval_id: string;
     recommendation: Recommendation;
     changed: boolean;
+  }[];
+  failed: { txn_id: string; error: string }[];
+}
+
+export interface SimulateResponse {
+  simulated: {
+    txn_id: string;
+    type: TxnType;
+    amount: number;
+    eval_id: string;
+    recommendation: Recommendation;
+    failed_checks: string[];
   }[];
   failed: { txn_id: string; error: string }[];
 }

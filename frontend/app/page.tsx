@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, CheckCheck, FileClock, ListChecks, LoaderCircle, LogOut, RefreshCw, Sparkles, X } from "lucide-react";
+import { ArrowRight, CheckCheck, FileClock, ListChecks, LoaderCircle, LogOut, Play, RefreshCw, Sparkles, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AuditPanel } from "@/components/audit-panel";
 import { ChatPanel, type ChatMessage } from "@/components/chat-panel";
@@ -103,6 +103,28 @@ export default function Home() {
     },
     onError: (error) => setQueueError(`Could not evaluate the queue: ${messageOf(error)}`),
     onSettled: () => { queueRunning.current = false; setLoadingRows([]); },
+  });
+
+  const simulateQueue = useMutation({
+    mutationFn: (mode: "random" | "signals") =>
+      api.simulate({ count: mode === "signals" ? 2 : 3, mode, policy_only: true }),
+    onMutate: () => {
+      setQueueError(null);
+      verify.reset();
+    },
+    onSuccess: async (result) => {
+      setQueueError(result.failed.length ? result.failed.map((item) => `${item.txn_id}: ${item.error}`).join(" · ") : null);
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["transactions"] }),
+        client.invalidateQueries({ queryKey: ["evaluation"] }),
+        client.invalidateQueries({ queryKey: ["audit"] }),
+      ]);
+      if (result.simulated.length && !focusedTxnId) {
+        setFocusedTxnId(result.simulated[0].txn_id);
+        setChecksOpen(true);
+      }
+    },
+    onError: (error) => setQueueError(`Could not simulate transactions: ${messageOf(error)}`),
   });
 
   const evaluate = evaluateQueue.mutate;
@@ -241,7 +263,7 @@ export default function Home() {
   const mode = getApiMode();
   const error = principals.error ?? queue.error;
   const changedEntries = Object.entries(changedRows);
-  const busy = evaluateQueue.isPending || decision.isPending || override.isPending || chat.isPending;
+  const busy = evaluateQueue.isPending || decision.isPending || override.isPending || chat.isPending || simulateQueue.isPending;
   const detailsOpen = checksOpen && Boolean(focusedTxnId);
 
   return (
@@ -339,6 +361,14 @@ export default function Home() {
             </div>
             {tab === "transactions" && <>
               <p className="ml-auto text-xs text-text-muted">{transactions.length} transactions · {transactions.filter((txn) => txn.status === "awaiting_review").length} awaiting review</p>
+              <Button variant="action-sm" disabled={busy || !queue.data} onClick={() => simulateQueue.mutate("random")} title="Pull 3 random transactions from the consolidated CSV and run policy checks">
+                {simulateQueue.isPending && simulateQueue.variables === "random" ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <Play className="size-3.5" aria-hidden="true" />}
+                Simulate CSV
+              </Button>
+              <Button variant="action-sm" disabled={busy || !queue.data} onClick={() => simulateQueue.mutate("signals")} title="Force-generate 2 flagged/exception signal transactions from the CSV">
+                {simulateQueue.isPending && simulateQueue.variables === "signals" ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <Zap className="size-3.5" aria-hidden="true" />}
+                Force signal
+              </Button>
               <Button variant="action-sm" disabled={busy || !queue.data} onClick={() => evaluateQueue.mutate(false)}>
                 {evaluateQueue.isPending ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
                 {evaluateQueue.isPending ? "Evaluating…" : "Evaluate queue"}
@@ -368,10 +398,10 @@ export default function Home() {
                 return <li key={txn.txn_id}>
                   <button type="button" disabled={loading || decision.isPending || override.isPending} onClick={() => openTransaction(txn)} aria-busy={loading}
                     aria-expanded={detailsOpen && focusedTxnId === txn.txn_id}
-                    className={cn("grid w-full grid-cols-[5.25rem_3.25rem_minmax(0,1fr)_auto_10.5rem] items-center gap-3 rounded-md border px-3 py-1.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus disabled:cursor-wait",
+                    className={cn("grid w-full grid-cols-[6.75rem_4.75rem_minmax(0,1fr)_auto_10.5rem] items-center gap-3 rounded-md border px-3 py-1.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus disabled:cursor-wait",
                       changed ? "border-2 border-status-positive-border bg-status-positive-bg" : txn.override_count > 0 ? "border-status-info-border bg-status-info-bg" : focusedTxnId === txn.txn_id ? "border-accent bg-accent-subtle" : "border-border-subtle bg-surface-1 hover:bg-surface-2")}>
-                    <span className="font-mono text-xs font-medium">{txn.txn_id}</span>
-                    <span className="text-xs text-text-muted capitalize">{txn.type}</span>
+                    <span className="truncate font-mono text-xs font-medium">{txn.txn_id}</span>
+                    <span className="truncate text-xs text-text-muted capitalize">{txn.type.replace("_", " ")}</span>
                     <span className="truncate">{txn.customer_name}<span className="ml-2 text-xs text-text-subtle">{statusLabels[txn.status]}</span></span>
                     <span className="font-medium">{txn.currency} {txn.amount.toLocaleString("en-CA")}</span>
                     <span className="flex flex-col items-end gap-1">
