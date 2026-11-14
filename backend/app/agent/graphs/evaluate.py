@@ -207,14 +207,12 @@ async def recommend(state: EvalState) -> Dict[str, Any]:
 
     structured_llm = get_structured_llm(RecommendOutput)
 
-    last_err: Exception | None = None
     for attempt in range(2):
         try:
             output: RecommendOutput = await structured_llm.ainvoke(messages)
             return {"llm_output": output.model_dump()}
         except Exception as exc:
-            last_err = exc
-            logger.warning("recommend LLM attempt %d failed: %s", attempt + 1, exc)
+            logger.warning("recommend LLM attempt %d failed (%s)", attempt + 1, type(exc).__name__)
 
     # Fallback per docs/plan-agent.md Risks: mark judgment checks no_pass on parse failure
     fallback = RecommendOutput(
@@ -222,14 +220,14 @@ async def recommend(state: EvalState) -> Dict[str, Any]:
             {
                 "criterion_id": c["id"],
                 "result": "no_pass",
-                "evidence": f"model output invalid ({last_err})",
-                "explanation": f"Automatic judgment evaluation failed to parse model output ({last_err}); escalated for manual review.",
+                "evidence": "Automatic judgment unavailable; retry evaluation or request manual review.",
+                "explanation": "The model could not complete this judgment check. This is not evidence of a policy violation. Approval remains blocked until the check is successfully evaluated or an authorized reviewer records an override with a reason.",
                 "precedents_used": [],
                 "adjustments_used": [],
             }
             for c in judgment_criteria
         ],
-        rationale="Automatic evaluation failed to parse model judgment; escalated for manual review.",
+        rationale="Automatic judgment could not be completed. Retry evaluation or request manual review.",
     )
     return {"llm_output": fallback.model_dump()}
 

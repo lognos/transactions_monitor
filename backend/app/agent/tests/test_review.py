@@ -275,3 +275,16 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
         await self.run_review(kind='override', criterion_id='C-04', result=None)
         self.audit.assert_not_awaited()
         self.invoke.assert_not_awaited()
+
+    async def test_model_failure_is_blocking_but_does_not_expose_provider_error(self):
+        from app.agent.graphs import evaluate
+        model = MagicMock()
+        model.ainvoke = AsyncMock(side_effect=RuntimeError('PRIVATE_PROVIDER_PAYLOAD quota exceeded'))
+        with patch.object(evaluate, 'get_structured_llm', return_value=model):
+            result = await evaluate.recommend({'txn': self.txn, 'customer': {'segment': 'payroll'},
+                                               'policy': self.policy, 'checks': []})
+        self.assertEqual(model.ainvoke.await_count, 2)
+        check = result['llm_output']['judgment_checks'][0]
+        self.assertEqual(check['result'], 'no_pass')
+        self.assertIn('not evidence of a policy violation', check['explanation'])
+        self.assertNotIn('PRIVATE_PROVIDER_PAYLOAD', str(result))
