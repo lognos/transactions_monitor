@@ -221,12 +221,14 @@ async def answer_question(state: ReviewState) -> Dict[str, Any]:
         ],
     )
 
+    updated_evaluation = {**evaluation, "thread": updated_thread}
     return {
+        "evaluation": updated_evaluation,
         "answer": {
             "answer": output.answer,
             "citations": clean_citations,
             "thread": updated_thread,
-        }
+        },
     }
 
 

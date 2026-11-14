@@ -112,7 +112,8 @@ Strict Rules:
 2. ADJUSTMENTS TAKE PRIORITY: If an Active Reviewer Adjustment matches the transaction's customer segment, timing, or context, it takes priority over the default reading of the criterion. You MUST apply it and include its `memory_id` in `adjustments_used`.
 3. SCOPE: Produce exactly one entry in `judgment_checks` for each supplied judgment criterion. Do NOT evaluate hard criteria.
 4. CITATIONS: Only list `memory_id` values in `precedents_used` and `adjustments_used` that were explicitly provided in the prompt context. Never invent IDs.
-5. CONCISE EVIDENCE: Keep `evidence` and `rationale` factual, specific (cite amounts, ratios, segments, dates), and 1–2 sentences."""
+5. CONCISE EVIDENCE & EXPLANATION: Keep `evidence` factual and specific (1–2 sentences for the checklist row). Write `explanation` as 2–4 sentences for the references dialog explaining what was compared, which precedent or adjustment decided it (if any), and what would change the result.
+6. STRICT DEFAULT THRESHOLDS: When a criterion specifies `ratio_hint` in `params` and `amount / typical_amount > ratio_hint`, return `no_pass` UNLESS an Active Reviewer Adjustment explicitly authorizes an exception. Do NOT invent segment-based or timing-based exceptions (such as payroll or month-end) without an Active Reviewer Adjustment."""
 
 RECOMMEND_SYSTEM_PROMPT = RECOMMEND_SYSTEM
 
@@ -192,6 +193,37 @@ def build_answer_messages(
                 }
             ),
             "### Active Policy Criteria\n" + _safe_json(policy.get("criteria", [])),
+            format_adjustments_block(adjustments),
+            format_precedents_block(precedents),
+        ]
+    )
+    return [
+        SystemMessage(content=ANSWER_SYSTEM),
+        HumanMessage(content=human_content),
+    ]
+
+
+def build_chat_messages(
+    *,
+    message: str,
+    policies: List[Dict[str, Any]],
+    precedents: List[Dict[str, Any]],
+    adjustments: List[Dict[str, Any]],
+) -> List[BaseMessage]:
+    """Build LangChain messages for general policy/memory Q&A (`run_chat`, no transaction in focus)."""
+    policy_summary = [
+        {
+            "txn_type": p.get("txn_type"),
+            "version": p.get("version"),
+            "criteria": p.get("criteria", []),
+            "decision_rules": p.get("decision_rules", []),
+        }
+        for p in policies
+    ]
+    human_content = "\n\n".join(
+        [
+            f"### Reviewer Question\n{message}",
+            "### Active Policies\n" + _safe_json(policy_summary),
             format_adjustments_block(adjustments),
             format_precedents_block(precedents),
         ]

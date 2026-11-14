@@ -28,7 +28,7 @@ from typing import Any, Dict, List, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.checks import CHECKS
+from app.agent.checks import CHECKS, DEFAULT_POLICIES
 from app.agent.graphs._deps import (
     agent_actor,
     make_insert,
@@ -56,6 +56,7 @@ class EvalState(TypedDict, total=False):
 
     txn_id: str
     principal_id: str
+    refresh: bool
     txn: Dict[str, Any]
     customer: Dict[str, Any]
     policy: Dict[str, Any]
@@ -89,6 +90,8 @@ async def load(state: EvalState) -> Dict[str, Any]:
     policy = await db["policies"].find_one(
         {"txn_type": txn["type"], "active": True}, {"_id": 0}
     )
+    if not policy:
+        policy = DEFAULT_POLICIES.get(txn["type"])
     if not policy:
         raise KeyError(f"No active policy for txn_type={txn['type']}")
 
@@ -127,6 +130,8 @@ async def run_checks(state: EvalState) -> Dict[str, Any]:
                 "source": "rule",
                 "result": outcome["result"],
                 "evidence": outcome["evidence"],
+                "explanation": outcome.get("explanation") or outcome["evidence"],
+                "facts": outcome.get("facts") or [],
                 "regulation_ref": criterion.get("regulation_ref", ""),
                 "precedents_used": [],
                 "adjustments_used": [],
@@ -208,6 +213,7 @@ async def recommend(state: EvalState) -> Dict[str, Any]:
                 "criterion_id": c["id"],
                 "result": "no_pass",
                 "evidence": f"model output invalid ({last_err})",
+                "explanation": f"Automatic judgment evaluation failed to parse model output ({last_err}); escalated for manual review.",
                 "precedents_used": [],
                 "adjustments_used": [],
             }
@@ -224,9 +230,28 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
     strip ungrounded memory IDs, and persist via `write_with_audit`.
     """
     txn = state["txn"]
+    customer = state.get("customer") or {}
     policy = state["policy"]
     principal_id = state.get("principal_id") or "ana"
+    refresh = bool(state.get("refresh", False))
     hard_by_id = {c["criterion_id"]: c for c in state.get("checks", [])}
+
+    amount = float(txn.get("amount") or 0)
+    typical = customer.get("typical_amount")
+    ratio_str = (
+        f"{amount / float(typical):.1f}x"
+        if typical and float(typical) > 0
+        else "N/A"
+    )
+    judgment_facts: List[Dict[str, str]] = [
+        {"label": "Amount", "value": f"CAD {amount:,.2f}"},
+        {
+            "label": "Typical amount",
+            "value": f"CAD {float(typical):,.2f}" if typical is not None else "Unknown",
+        },
+        {"label": "Ratio to typical", "value": ratio_str},
+        {"label": "Customer segment", "value": str(customer.get("segment") or "Unknown")},
+    ]
 
     valid_precedent_ids = {
         p["memory_id"] for p in state.get("precedents", []) if p.get("memory_id")
@@ -258,6 +283,8 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
                         "source": "rule",
                         "result": "no_pass",
                         "evidence": "Hard criterion result missing from run_checks.",
+                        "explanation": "Hard criterion result missing from run_checks.",
+                        "facts": [],
                         "regulation_ref": criterion.get("regulation_ref", ""),
                         "precedents_used": [],
                         "adjustments_used": [],
@@ -274,6 +301,8 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
                 "source": "llm",
                 "result": "no_pass",
                 "evidence": "Judgment criterion omitted from model output.",
+                "explanation": "Judgment criterion omitted from model output.",
+                "facts": judgment_facts,
                 "regulation_ref": criterion.get("regulation_ref", ""),
                 "precedents_used": [],
                 "adjustments_used": [],
@@ -294,6 +323,8 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
                 "source": "llm",
                 "result": raw_jc["result"],
                 "evidence": raw_jc["evidence"],
+                "explanation": raw_jc.get("explanation") or raw_jc["evidence"],
+                "facts": judgment_facts,
                 "regulation_ref": criterion.get("regulation_ref", ""),
                 "precedents_used": p_used,
                 "adjustments_used": a_used,
@@ -326,6 +357,24 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         "created_at": now,
     }
 
+    writes = []
+    if refresh:
+        writes.append(
+            make_update(
+                "evaluations",
+                {"txn_id": txn["txn_id"], "status": "awaiting_review"},
+                {"$set": {"status": "superseded"}},
+            )
+        )
+    writes.extend([
+        make_insert("evaluations", evaluation_doc),
+        make_update(
+            "transactions",
+            {"txn_id": txn["txn_id"]},
+            {"$set": {"status": "awaiting_review"}},
+        ),
+    ])
+
     await write_with_audit(
         actor=actor,
         event="evaluation.created",
@@ -338,14 +387,7 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
             "precedents_used": all_precedents_used,
             "adjustments_used": all_adjustments_used,
         },
-        writes=[
-            make_insert("evaluations", evaluation_doc),
-            make_update(
-                "transactions",
-                {"txn_id": txn["txn_id"]},
-                {"$set": {"status": "awaiting_review"}},
-            ),
-        ],
+        writes=writes,
     )
 
     return {"checks": merged_checks, "evaluation": evaluation_doc}

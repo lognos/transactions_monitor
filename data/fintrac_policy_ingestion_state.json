@@ -4,7 +4,7 @@
   "active_policies": 170,
   "upcoming_policies": 0,
   "expired_policies": 2,
-  "csv_path": "/Users/epheriami/Downloads/Projects/mongodb/data/fintrac_policy_monitoring_catalog.csv",
+  "csv_path": "mongodb/data/fintrac_policy_monitoring_catalog.csv",
   "vector_ingest_result": {
     "status": "LIVE_SYNC_SUCCESS",
     "active_policies": 170,

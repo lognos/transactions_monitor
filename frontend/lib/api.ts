@@ -12,6 +12,7 @@ import type {
   Health,
   Principal,
   ReferencesResponse,
+  SimulateResponse,
   TransactionSummary,
   TxnStatus,
   Verdict,
@@ -27,12 +28,12 @@ export function setPrincipal(id: string | null) {
 }
 
 type ApiSource = "fixture" | "backend";
-// Change any individual line to "backend" as that endpoint becomes available.
-// Set NEXT_PUBLIC_API_SOURCE=backend to start with every call on the real API.
-const defaultSource: ApiSource = process.env.NEXT_PUBLIC_API_SOURCE === "backend" ? "backend" : "fixture";
+// Every endpoint defaults to the real FastAPI backend.
+// Set NEXT_PUBLIC_API_SOURCE=fixture to fall back to in-memory fixtures.
+const defaultSource: ApiSource = process.env.NEXT_PUBLIC_API_SOURCE === "fixture" ? "fixture" : "backend";
 export const apiSources: Record<
   "health" | "principals" | "transactions" | "evaluate" | "evaluation" | "ask" |
-  "decide" | "audit" | "verifyChain" | "evaluatePending" | "references" | "chat",
+  "decide" | "audit" | "verifyChain" | "evaluatePending" | "simulate" | "references" | "chat",
   ApiSource
 > = {
   health: defaultSource,
@@ -45,6 +46,7 @@ export const apiSources: Record<
   audit: defaultSource,
   verifyChain: defaultSource,
   evaluatePending: defaultSource,
+  simulate: defaultSource,
   references: defaultSource,
   chat: defaultSource,
 };
@@ -108,6 +110,9 @@ export const api = {
     request<Evaluation>("POST", `/transactions/${pathId(txnId)}/evaluate${refresh ? "?refresh=true" : ""}`)),
   evaluatePending: (refresh = false) => call("evaluatePending", () => fixtures.evaluatePending(principalId, refresh), () =>
     request<EvaluatePendingResponse>("POST", "/transactions/evaluate-pending", { refresh })),
+  simulate: (options: { count?: number; mode?: "random" | "signals" | "sequential"; policy_only?: boolean } = {}) =>
+    call("simulate", async () => ({ simulated: [], failed: [] }), () =>
+      request<SimulateResponse>("POST", "/transactions/simulate", options)),
   evaluation: (evalId: string) => call("evaluation", () => fixtures.evaluation(evalId), () =>
     request<Evaluation>("GET", `/evaluations/${pathId(evalId)}`)),
   references: (evalId: string, criterionId: string) => call("references", () => fixtures.references(evalId, criterionId), () =>

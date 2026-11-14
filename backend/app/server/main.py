@@ -19,7 +19,7 @@ from app.db.audit import verify_chain
 from app.server.deps import current_principal
 from app.server.errors import ApiError, install_error_handlers
 from app.server.references import get_check_references, label_citations
-from app.server.schemas import AskBody, ChatBody, DecideBody, EvaluatePendingBody
+from app.server.schemas import AskBody, ChatBody, DecideBody, EvaluatePendingBody, SimulateBody
 from app.server.serialization import public_data
 
 NO_ID = {"_id": 0}
@@ -148,6 +148,19 @@ async def evaluate_pending(
         else:
             evaluated.append(result)
     return public_data({"evaluated": evaluated, "failed": failed})
+
+
+@app.post("/transactions/simulate")
+async def simulate(
+    body: SimulateBody, principal: dict = Principal,
+) -> dict[str, Any]:
+    result = await agent.run_simulate(
+        principal_id=principal["_id"],
+        count=body.count,
+        mode=body.mode,
+        policy_only=body.policy_only,
+    )
+    return public_data(result)
 
 
 @app.post("/transactions/{txn_id}/evaluate")

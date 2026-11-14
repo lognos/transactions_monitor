@@ -44,7 +44,7 @@ async def write_with_audit(
     *,
     actor: dict[str, Any],
     event: str,
-    txn_id: str,
+    txn_id: str | None,
     ref: dict[str, str],
     detail: dict[str, Any],
     writes: list[Write],

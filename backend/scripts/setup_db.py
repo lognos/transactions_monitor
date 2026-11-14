@@ -59,7 +59,7 @@ AUDIT_LOG_SCHEMA = {
                 "memory.created",
             ]
         },
-        "txn_id": {"bsonType": "string"},
+        "txn_id": {"bsonType": ["string", "null"]},
         "ref": {
             "bsonType": "object",
             "required": ["collection", "id"],

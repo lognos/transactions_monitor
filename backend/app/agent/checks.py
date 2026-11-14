@@ -328,6 +328,20 @@ def _parse_iso_date(val: Any) -> Optional[datetime]:
 # CheckOutcome: {"result": "pass" | "no_pass" | "flag", "evidence": str}
 # ---------------------------------------------------------------------------
 
+def _outcome(
+    result: str,
+    evidence: str,
+    explanation: str,
+    facts: List[Dict[str, str]],
+) -> dict:
+    return {
+        "result": result,
+        "evidence": evidence,
+        "explanation": explanation,
+        "facts": facts,
+    }
+
+
 async def sanctions_screen(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
     """
     Criterion C-01 (Must-have):
@@ -343,37 +357,54 @@ async def sanctions_screen(txn: dict, customer: dict, params: dict, db: Any = No
     counterparty = txn.get("counterparty") or {}
     cp_name = counterparty.get("name") or ""
     cp_norm = _normalize_str(cp_name)
+    cp_country = (counterparty.get("country") or "").upper().strip()
 
-    if cp_norm and any(sanctioned in cp_norm or cp_norm in sanctioned for sanctioned in all_sanctioned):
-        return {
-            "result": "no_pass",
-            "evidence": f"Counterparty '{cp_name}' matches Canadian sanctions list (SEMA / OSFI / PCMLTFA s. 7.1)."
-        }
-
-    # 2. Check Originator Name (if different from customer)
     type_spec = txn.get("type_specific") or {}
     originator = type_spec.get("originator") or {}
-    orig_name = originator.get("name") or ""
+    orig_name = originator.get("name") or (customer.get("name") if customer else "") or ""
     orig_norm = _normalize_str(orig_name)
 
-    if orig_norm and any(sanctioned in orig_norm or orig_norm in sanctioned for sanctioned in all_sanctioned):
-        return {
-            "result": "no_pass",
-            "evidence": f"Originator '{orig_name}' matches Canadian sanctions list (SEMA / OSFI)."
-        }
+    base_facts = [
+        {"label": "Counterparty", "value": cp_name or "Not provided"},
+        {"label": "Counterparty country", "value": cp_country or "Not provided"},
+        {"label": "Originator", "value": orig_name or "Not provided"},
+    ]
+
+    if cp_norm and any(sanctioned in cp_norm or cp_norm in sanctioned for sanctioned in all_sanctioned):
+        return _outcome(
+            "no_pass",
+            f"Counterparty '{cp_name}' matches Canadian sanctions list (SEMA / OSFI / PCMLTFA s. 7.1).",
+            f"Canadian sanctions screening under SEMA, OSFI, and PCMLTFA s. 7.1 matched counterparty '{cp_name}' against a designated entity list. Processing transactions with designated parties is strictly prohibited and cannot be overridden by a reviewer.",
+            base_facts,
+        )
+
+    # 2. Check Originator Name (if different from customer)
+    orig_field_name = originator.get("name") or ""
+    orig_field_norm = _normalize_str(orig_field_name)
+    if orig_field_norm and any(sanctioned in orig_field_norm or orig_field_norm in sanctioned for sanctioned in all_sanctioned):
+        return _outcome(
+            "no_pass",
+            f"Originator '{orig_field_name}' matches Canadian sanctions list (SEMA / OSFI).",
+            f"Canadian sanctions screening under SEMA and OSFI matched originator '{orig_field_name}' against a designated entity list. This is a mandatory statutory block and no reviewer can override it.",
+            base_facts,
+        )
 
     # 3. Check Counterparty Country for Sanctions Embargoes
-    cp_country = (counterparty.get("country") or "").upper().strip()
     if cp_country in HIGH_RISK_SANCTIONED_COUNTRIES:
-        return {
-            "result": "no_pass",
-            "evidence": f"Counterparty country '{cp_country}' is subject to Canadian sanctions embargo ({HIGH_RISK_SANCTIONED_COUNTRIES[cp_country]})."
-        }
+        embargo = HIGH_RISK_SANCTIONED_COUNTRIES[cp_country]
+        return _outcome(
+            "no_pass",
+            f"Counterparty country '{cp_country}' is subject to Canadian sanctions embargo ({embargo}).",
+            f"Counterparty country '{cp_country}' ({embargo}) is subject to a Canadian sanctions embargo. Transactions involving embargoed jurisdictions are prohibited and cannot be overridden.",
+            base_facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": "Counterparty and originator cleared against Canadian sanctions lists and designated entities."
-    }
+    return _outcome(
+        "pass",
+        "Counterparty and originator cleared against Canadian sanctions lists and designated entities.",
+        "Both the counterparty and originator names, along with the counterparty country, were screened against Canadian sanctions lists (SEMA, OSFI, Criminal Code s. 83.05) with no matches found.",
+        base_facts,
+    )
 
 
 async def account_ok(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -395,33 +426,67 @@ async def account_ok(txn: dict, customer: dict, params: dict, db: Any = None) ->
                 pass
 
     if not customer:
-        return {
-            "result": "pass",
-            "evidence": "Customer record verified; account operational."
-        }
+        return _outcome(
+            "pass",
+            "Customer record verified; account operational.",
+            "No customer restrictions were found on the transaction record, so the account is treated as operational.",
+            [{"label": "Customer ID", "value": str(txn.get("customer_id") or "Unknown")}],
+        )
 
-    # 1. Account Status
+    type_spec = txn.get("type_specific") or {}
+    return_reason = type_spec.get("return_reason_code")
+    posting_status = str(type_spec.get("posting_status") or "").upper()
+    sender_status = str(type_spec.get("sender_account_status") or "").lower()
+    receiver_status = str(type_spec.get("receiver_account_status") or "").lower()
     status = str(customer.get("account_status", "open")).lower()
-    if status in ("closed", "frozen", "suspended", "dormant", "restricted"):
-        return {
-            "result": "no_pass",
-            "evidence": f"Customer account {customer.get('customer_id', 'unknown')} is {status}; transactions prohibited."
-        }
-
-    # 2. Balance Check (for outgoing payments: wire or cheque presented)
     balance = customer.get("balance")
     amount = txn.get("amount", 0)
-    if balance is not None and isinstance(balance, (int, float)):
-        if balance < amount:
-            return {
-                "result": "no_pass",
-                "evidence": f"Insufficient funds: available balance CAD {balance:,.2f} is less than transaction amount CAD {amount:,.2f}."
-            }
 
-    return {
-        "result": "pass",
-        "evidence": f"Customer account {customer.get('customer_id', '')} is open, active, and funded."
-    }
+    facts = [
+        {"label": "Customer ID", "value": str(customer.get("customer_id", "unknown"))},
+        {"label": "Account status", "value": sender_status or status},
+        {"label": "Transaction amount", "value": f"CAD {float(amount):,.2f}"},
+    ]
+    if balance is not None and isinstance(balance, (int, float)):
+        facts.append({"label": "Available balance", "value": f"CAD {balance:,.2f}"})
+    if return_reason or posting_status:
+        facts.append({"label": "Return / posting status", "value": str(return_reason or posting_status)})
+
+    # 0. Returned item / return reason code (e.g. NSF, STOP_PAYMENT, ACCOUNT_CLOSED)
+    if return_reason or posting_status == "RETURNED":
+        reason_label = return_reason or "RETURNED"
+        return _outcome(
+            "no_pass",
+            f"Item returned ({reason_label}); cannot clear without resolution (Payments Canada Rule A4).",
+            f"This item carries a return status ({reason_label}) under Payments Canada Rule A4. Returned items cannot be cleared until the underlying return reason is resolved.",
+            facts,
+        )
+
+    # 1. Account Status (customer profile or transaction-level sender/receiver status)
+    for label, st in (("sender", sender_status or status), ("receiver", receiver_status)):
+        if st in ("closed", "frozen", "suspended", "dormant", "restricted"):
+            return _outcome(
+                "no_pass",
+                f"{label.capitalize()} account ({customer.get('customer_id', 'unknown')}) is {st}; transactions prohibited.",
+                f"The {label} account is currently '{st}', which prohibits processing this transaction. An authorized account status change is required before the transaction can proceed.",
+                facts,
+            )
+
+    # 2. Balance Check (for outgoing payments: wire or cheque presented)
+    if balance is not None and isinstance(balance, (int, float)) and balance < amount:
+        return _outcome(
+            "no_pass",
+            f"Insufficient funds: available balance CAD {balance:,.2f} is less than transaction amount CAD {amount:,.2f}.",
+            f"The customer's available balance (CAD {balance:,.2f}) is below the transaction amount (CAD {float(amount):,.2f}). The transaction cannot clear without sufficient funds.",
+            facts,
+        )
+
+    return _outcome(
+        "pass",
+        f"Customer account {customer.get('customer_id', '')} is open, active, and funded.",
+        f"Customer account {customer.get('customer_id', '')} is in '{sender_status or status}' standing with no return flags and sufficient funds to cover the transaction.",
+        facts,
+    )
 
 
 async def duplicate(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -438,6 +503,25 @@ async def duplicate(txn: dict, customer: dict, params: dict, db: Any = None) -> 
     cp_name = counterparty.get("name")
     type_spec = txn.get("type_specific") or {}
     image_hash = type_spec.get("image_hash")
+    orig_txn_id = type_spec.get("original_transaction_id")
+
+    facts = [
+        {"label": "Lookback window", "value": f"{lookback_days} days"},
+        {"label": "Amount", "value": f"CAD {float(amount or 0):,.2f}"},
+        {"label": "Counterparty", "value": cp_name or "Not provided"},
+    ]
+    if image_hash:
+        facts.append({"label": "Image hash", "value": str(image_hash)})
+
+    # Direct reference to an already-presented original item (e.g. streamed duplicate cheque)
+    if orig_txn_id and orig_txn_id != txn_id:
+        facts.append({"label": "Original transaction", "value": str(orig_txn_id)})
+        return _outcome(
+            "no_pass",
+            f"Duplicate item detected: references original transaction {orig_txn_id} (image hash {image_hash or 'n/a'}) within clearing window (Payments Canada Rule A4).",
+            f"Under Payments Canada Rule A4, an item cannot be cleared twice within the {lookback_days}-day clearing window. This transaction references original transaction {orig_txn_id}, indicating a duplicate presentment.",
+            facts,
+        )
 
     # In-memory duplicate check or DB query if connected
     if db is not None and cust_id and amount:
@@ -445,41 +529,56 @@ async def duplicate(txn: dict, customer: dict, params: dict, db: Any = None) -> 
             # Look back 30 days
             now_dt = _parse_iso_date(txn.get("created_at")) or datetime.now(timezone.utc)
             window_start = now_dt - timedelta(days=lookback_days)
+            or_clauses: List[Dict[str, Any]] = [
+                {
+                    "customer_id": cust_id,
+                    "amount": amount,
+                    "$or": [
+                        {"created_at": {"$gte": window_start}},
+                        {"created_at": {"$gte": window_start.isoformat()}},
+                    ],
+                }
+            ]
+            if cp_name:
+                or_clauses[0]["counterparty.name"] = cp_name
+            if txn.get("type"):
+                or_clauses[0]["type"] = txn["type"]
+            if image_hash:
+                or_clauses.append({"type_specific.image_hash": image_hash})
+
             query: Dict[str, Any] = {
                 "txn_id": {"$ne": txn_id},
-                "customer_id": cust_id,
-                "amount": amount,
                 "status": {"$in": ["passed", "pending", "awaiting_review"]},
-                "$or": [
-                    {"created_at": {"$gte": window_start}},
-                    {"created_at": {"$gte": window_start.isoformat()}},
-                ],
+                "$or": or_clauses,
             }
-            if txn.get("type"):
-                query["type"] = txn["type"]
-            if cp_name:
-                query["counterparty.name"] = cp_name
             if hasattr(db, "transactions") and hasattr(db.transactions, "find_one"):
                 existing = await db.transactions.find_one(query)
                 if existing:
-                    return {
-                        "result": "no_pass",
-                        "evidence": f"Duplicate item detected: matches existing transaction {existing.get('txn_id')} (CAD {amount:,.2f}) within 30-day clearing window (Payments Canada Rule A4)."
-                    }
+                    facts.append({"label": "Matching transaction", "value": str(existing.get("txn_id"))})
+                    return _outcome(
+                        "no_pass",
+                        f"Duplicate item detected: matches existing transaction {existing.get('txn_id')} (CAD {amount:,.2f}) within 30-day clearing window (Payments Canada Rule A4).",
+                        f"A matching transaction ({existing.get('txn_id')}) for CAD {float(amount):,.2f} with the same customer, counterparty, or image hash was already recorded within the {lookback_days}-day clearing window. Under Payments Canada Rule A4, duplicate items must be blocked.",
+                        facts,
+                    )
         except Exception:
             pass
 
     # Check image_hash match if provided in type_specific
     if image_hash and type_spec.get("is_duplicate_image", False):
-        return {
-            "result": "no_pass",
-            "evidence": f"Cheque image hash {image_hash} matches an item already presented within 30 days (Payments Canada Rule A4)."
-        }
+        return _outcome(
+            "no_pass",
+            f"Cheque image hash {image_hash} matches an item already presented within 30 days (Payments Canada Rule A4).",
+            f"The cheque image hash ({image_hash}) matches a previously presented item within the {lookback_days}-day clearing window. Duplicate presentments are prohibited under Payments Canada Rule A4.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"No duplicate transaction detected for customer within the {lookback_days}-day clearing window (Payments Canada Rule A4)."
-    }
+    return _outcome(
+        "pass",
+        f"No duplicate transaction detected for customer within the {lookback_days}-day clearing window (Payments Canada Rule A4).",
+        f"No matching transaction by customer, counterparty, amount, or image hash was found within the {lookback_days}-day ACSS clearing window.",
+        facts,
+    )
 
 
 async def structuring_24h(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -491,6 +590,10 @@ async def structuring_24h(txn: dict, customer: dict, params: dict, db: Any = Non
     threshold = params.get("threshold", 10000)
     cust_id = txn.get("customer_id")
     amount = float(txn.get("amount", 0))
+    facts = [
+        {"label": "Transaction amount", "value": f"CAD {amount:,.2f}"},
+        {"label": "24h aggregation threshold", "value": f"CAD {float(threshold):,.2f}"},
+    ]
 
     if db is not None and cust_id:
         try:
@@ -507,25 +610,32 @@ async def structuring_24h(txn: dict, customer: dict, params: dict, db: Any = Non
                 })
                 recent_txns = await cursor.to_list(length=50)
                 rolling_total = amount + sum(float(t.get("amount", 0)) for t in recent_txns)
+                facts.append({"label": "24h rolling total", "value": f"CAD {rolling_total:,.2f} ({len(recent_txns) + 1} txns)"})
                 if rolling_total >= threshold and len(recent_txns) >= 1:
-                    return {
-                        "result": "flag",
-                        "evidence": f"24-hour aggregated volume of CAD {rolling_total:,.2f} across {len(recent_txns)+1} transactions meets/exceeds the $10,000 CAD threshold (PCMLTFA Regulations s. 126)."
-                    }
+                    return _outcome(
+                        "flag",
+                        f"24-hour aggregated volume of CAD {rolling_total:,.2f} across {len(recent_txns)+1} transactions meets/exceeds the $10,000 CAD threshold (PCMLTFA Regulations s. 126).",
+                        f"Under PCMLTFA Regulations s. 126, multiple transactions by the same customer within 24 hours totaling CAD {float(threshold):,.2f} or more must be aggregated for reporting and structuring review. This transaction brings the 24-hour total to CAD {rolling_total:,.2f} across {len(recent_txns) + 1} transactions.",
+                        facts,
+                    )
         except Exception:
             pass
 
     # Single transaction smurfing detection hint: exactly just under $10,000 (e.g. $9,800 - $9,999)
     if 9500 <= amount < 10000:
-        return {
-            "result": "flag",
-            "evidence": f"Transaction amount CAD {amount:,.2f} is just below the $10,000 reporting threshold; flagged for 24-hour aggregation monitoring."
-        }
+        return _outcome(
+            "flag",
+            f"Transaction amount CAD {amount:,.2f} is just below the $10,000 reporting threshold; flagged for 24-hour aggregation monitoring.",
+            f"The transaction amount (CAD {amount:,.2f}) sits just below the CAD {float(threshold):,.2f} FINTRAC reporting threshold, which is a common structuring indicator. It is flagged for reviewer monitoring rather than blocked.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": "24-hour transaction volume is within standard thresholds."
-    }
+    return _outcome(
+        "pass",
+        "24-hour transaction volume is within standard thresholds.",
+        f"The transaction amount (CAD {amount:,.2f}) and rolling 24-hour customer volume are below the CAD {float(threshold):,.2f} structuring aggregation threshold.",
+        facts,
+    )
 
 
 async def travel_rule_fields(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -555,12 +665,17 @@ async def travel_rule_fields(txn: dict, customer: dict, params: dict, db: Any = 
     type_spec = txn.get("type_specific") or {}
     originator = type_spec.get("originator") or {}
     orig_name = originator.get("name") or (customer.get("name") if customer else None)
-    orig_account = originator.get("account") or (customer.get("account_number") if customer else None)
-    orig_address = originator.get("address") or (customer.get("address") if customer else None)
 
     # In domestic context customer_id identifies the account, but wire originator must be present
     if not orig_name and not customer:
         missing_fields.append("originator.name")
+
+    facts = [
+        {"label": "Originator name", "value": str(orig_name) if orig_name else "Missing"},
+        {"label": "Beneficiary name", "value": str(cp_name) if cp_name and str(cp_name).strip() else "Missing"},
+        {"label": "Beneficiary account", "value": str(cp_account) if cp_account and str(cp_account).strip() else "Missing"},
+        {"label": "Beneficiary address", "value": str(cp_address) if cp_address and str(cp_address).strip() else "Missing"},
+    ]
 
     if missing_fields:
         # Match exact evidence phrasing in contracts.md §3.5 when counterparty.address is the issue
@@ -568,15 +683,19 @@ async def travel_rule_fields(txn: dict, customer: dict, params: dict, db: Any = 
             evidence = "counterparty.address is missing"
         else:
             evidence = f"Mandatory Travel Rule field(s) missing: {', '.join(missing_fields)}"
-        return {
-            "result": "no_pass",
-            "evidence": evidence
-        }
+        return _outcome(
+            "no_pass",
+            evidence,
+            f"The FINTRAC Travel Rule (PCMLTFA Regulations s. 138-141) requires the originator and beneficiary's name, account number, and address to travel with a wire. Required field(s) ({', '.join(missing_fields)}) are missing, so the wire cannot proceed until corrected. This is a mandatory rule and no reviewer can override it.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": "Originator and beneficiary information is complete (name, account, address) per FINTRAC Travel Rule."
-    }
+    return _outcome(
+        "pass",
+        "Originator and beneficiary information is complete (name, account, address) per FINTRAC Travel Rule.",
+        "All mandatory originator and beneficiary Travel Rule fields (name, account, and address) are present on the wire instruction.",
+        facts,
+    )
 
 
 async def eft_report_threshold(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -588,17 +707,25 @@ async def eft_report_threshold(txn: dict, customer: dict, params: dict, db: Any 
     """
     threshold = params.get("threshold", 10000)
     amount = float(txn.get("amount", 0))
+    facts = [
+        {"label": "Transfer amount", "value": f"CAD {amount:,.2f}"},
+        {"label": "EFTR threshold", "value": f"CAD {float(threshold):,.2f}"},
+    ]
 
     if amount >= threshold:
-        return {
-            "result": "flag",
-            "evidence": f"Amount CAD {amount:,.2f} meets or exceeds the $10,000 threshold for mandatory FINTRAC EFTR reporting (PCMLTFA s. 9.1)."
-        }
+        return _outcome(
+            "flag",
+            f"Amount CAD {amount:,.2f} meets or exceeds the $10,000 threshold for mandatory FINTRAC EFTR reporting (PCMLTFA s. 9.1).",
+            f"Electronic funds transfers of CAD {float(threshold):,.2f} or more require a mandatory Electronic Funds Transfer Report (EFTR) to FINTRAC within 5 business days under PCMLTFA s. 9.1. This is a reporting obligation flag and does not by itself block the wire.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Amount CAD {amount:,.2f} is below the $10,000 EFTR reporting threshold."
-    }
+    return _outcome(
+        "pass",
+        f"Amount CAD {amount:,.2f} is below the $10,000 EFTR reporting threshold.",
+        f"The wire amount (CAD {amount:,.2f}) is below the CAD {float(threshold):,.2f} threshold, so no mandatory EFTR filing is triggered.",
+        facts,
+    )
 
 
 async def cheque_date_valid(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -610,42 +737,62 @@ async def cheque_date_valid(txn: dict, customer: dict, params: dict, db: Any = N
     """
     max_age_days = params.get("max_age_days", 180)
     type_spec = txn.get("type_specific") or {}
-    cheque_date_val = type_spec.get("cheque_date") or txn.get("cheque_date")
+    cheque_date_val = (
+        type_spec.get("cheque_date")
+        or txn.get("cheque_date")
+        or type_spec.get("cheque_capture_timestamp")
+        or txn.get("created_at")
+    )
 
     if not cheque_date_val:
-        return {
-            "result": "no_pass",
-            "evidence": "Cheque date is missing from transaction payload (Payments Canada Rule A1)."
-        }
+        return _outcome(
+            "no_pass",
+            "Cheque date is missing from transaction payload (Payments Canada Rule A1).",
+            "Payments Canada Rule A1 requires a valid cheque date to verify clearing eligibility. No cheque date was found in the transaction payload, so the item cannot be cleared.",
+            [{"label": "Cheque date", "value": "Missing"}],
+        )
 
     cheque_dt = _parse_iso_date(cheque_date_val)
     if not cheque_dt:
-        return {
-            "result": "no_pass",
-            "evidence": f"Invalid cheque date format '{cheque_date_val}' (expected YYYY-MM-DD)."
-        }
+        return _outcome(
+            "no_pass",
+            f"Invalid cheque date format '{cheque_date_val}' (expected YYYY-MM-DD).",
+            f"The supplied cheque date '{cheque_date_val}' could not be parsed as a valid ISO date. Validating whether the cheque is stale- or post-dated requires a parseable date.",
+            [{"label": "Cheque date", "value": str(cheque_date_val)}],
+        )
 
     presentment_dt = _parse_iso_date(txn.get("created_at")) or datetime.now(timezone.utc)
     delta_days = (presentment_dt.date() - cheque_dt.date()).days
+    facts = [
+        {"label": "Cheque date", "value": cheque_dt.strftime("%Y-%m-%d")},
+        {"label": "Presentment date", "value": presentment_dt.strftime("%Y-%m-%d")},
+        {"label": "Age (days)", "value": f"{delta_days} days"},
+    ]
 
     # Post-dated check (future date relative to presentment)
     if delta_days < 0:
-        return {
-            "result": "no_pass",
-            "evidence": f"Cheque is post-dated ({cheque_dt.strftime('%Y-%m-%d')} is after presentment date {presentment_dt.strftime('%Y-%m-%d')}). Ineligible for clearing prior to date under Payments Canada Rule A1."
-        }
+        return _outcome(
+            "no_pass",
+            f"Cheque is post-dated ({cheque_dt.strftime('%Y-%m-%d')} is after presentment date {presentment_dt.strftime('%Y-%m-%d')}). Ineligible for clearing prior to date under Payments Canada Rule A1.",
+            f"The cheque is dated {cheque_dt.strftime('%Y-%m-%d')}, which is {-delta_days} day(s) after the presentment date ({presentment_dt.strftime('%Y-%m-%d')}). Under Payments Canada Rule A1, post-dated cheques are ineligible for clearing prior to the stated date.",
+            facts,
+        )
 
     # Stale-dated check (> 180 calendar days / 6 months)
     if delta_days > max_age_days:
-        return {
-            "result": "no_pass",
-            "evidence": f"Cheque is stale-dated ({delta_days} days old, exceeds maximum allowable age of {max_age_days} days under Payments Canada Rule A1 / Bills of Exchange Act s. 26)."
-        }
+        return _outcome(
+            "no_pass",
+            f"Cheque is stale-dated ({delta_days} days old, exceeds maximum allowable age of {max_age_days} days under Payments Canada Rule A1 / Bills of Exchange Act s. 26).",
+            f"The cheque is {delta_days} days old, exceeding the {max_age_days}-day clearing limit under Payments Canada Rule A1 and Bills of Exchange Act s. 26. Stale-dated cheques cannot clear without re-issuance.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Cheque date {cheque_dt.strftime('%Y-%m-%d')} is valid ({delta_days} days old; within 180-day clearing window)."
-    }
+    return _outcome(
+        "pass",
+        f"Cheque date {cheque_dt.strftime('%Y-%m-%d')} is valid ({delta_days} days old; within 180-day clearing window).",
+        f"The cheque date ({cheque_dt.strftime('%Y-%m-%d')}) is {delta_days} days before presentment, which is neither post-dated nor stale-dated beyond the {max_age_days}-day limit.",
+        facts,
+    )
 
 
 async def hold_period_applied(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -660,45 +807,59 @@ async def hold_period_applied(txn: dict, customer: dict, params: dict, db: Any =
     hold_days = type_spec.get("hold_days_applied")
     channel = str(type_spec.get("deposit_channel", "branch")).lower()
     amount = float(txn.get("amount", 0))
+    facts = [
+        {"label": "Deposit channel", "value": channel},
+        {"label": "Amount", "value": f"CAD {amount:,.2f}"},
+        {"label": "Hold days applied", "value": str(hold_days) if hold_days is not None else "Standard"},
+    ]
 
     if hold_days is None:
-        return {
-            "result": "pass",
-            "evidence": "Standard statutory hold schedule applied per Bank Act regulations."
-        }
+        return _outcome(
+            "pass",
+            "Standard statutory hold schedule applied per Bank Act regulations.",
+            "No custom hold override was specified on the cheque deposit, so the standard Bank Act Access to Funds Regulations (SOR/2012-24) schedule applies.",
+            facts,
+        )
 
     is_branch = "branch" in channel or "in_person" in channel
     max_days = (4 if is_branch else 5) if amount <= 1500 else (7 if is_branch else 8)
+    facts.append({"label": "Statutory max hold", "value": f"{max_days} business days"})
 
-    # Check for statutory hold exceptions:
-    # 1. New customer account open < 90 days
-    # 2. Prior NSF history
-    # 3. Fraud suspicion
     account_opened_dt = _parse_iso_date(customer.get("account_opened_date")) if customer else None
     if account_opened_dt:
         days_open = (datetime.now(timezone.utc) - account_opened_dt).days
         if days_open < 90:
-            return {
-                "result": "pass",
-                "evidence": f"Extended hold of {hold_days} days permitted under Bank Act new-account exception (< 90 days open)."
-            }
+            facts.append({"label": "Account age", "value": f"{days_open} days (< 90-day exception)"})
+            return _outcome(
+                "pass",
+                f"Extended hold of {hold_days} days permitted under Bank Act new-account exception (< 90 days open).",
+                f"Although {hold_days} days exceeds the standard {max_days}-day limit, the account has been open for {days_open} days (< 90 days), which qualifies for the Bank Act new-account hold exception.",
+                facts,
+            )
 
     if customer and customer.get("nsf_history_6m", 0) > 0:
-        return {
-            "result": "pass",
-            "evidence": f"Extended hold of {hold_days} days permitted under Bank Act severe NSF history exception."
-        }
+        facts.append({"label": "6m NSF count", "value": str(customer.get("nsf_history_6m", 0))})
+        return _outcome(
+            "pass",
+            f"Extended hold of {hold_days} days permitted under Bank Act severe NSF history exception.",
+            f"Although {hold_days} days exceeds the standard {max_days}-day limit, the customer has prior NSF history within 6 months, permitting an extended hold under Bank Act exceptions.",
+            facts,
+        )
 
     if hold_days > max_days:
-        return {
-            "result": "no_pass",
-            "evidence": f"Hold period of {hold_days} days exceeds federal maximum of {max_days} days for CAD {amount:,.2f} via {channel} (Bank Act SOR/2012-24)."
-        }
+        return _outcome(
+            "no_pass",
+            f"Hold period of {hold_days} days exceeds federal maximum of {max_days} days for CAD {amount:,.2f} via {channel} (Bank Act SOR/2012-24).",
+            f"The applied hold of {hold_days} business days exceeds the federal maximum of {max_days} business days for a CAD {amount:,.2f} deposit via {channel} under Bank Act SOR/2012-24, and no statutory exception applies.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Hold period of {hold_days} business days complies with Bank Act Access to Funds Regulations (SOR/2012-24)."
-    }
+    return _outcome(
+        "pass",
+        f"Hold period of {hold_days} business days complies with Bank Act Access to Funds Regulations (SOR/2012-24).",
+        f"The applied hold of {hold_days} business days is within the federal maximum of {max_days} business days for a CAD {amount:,.2f} deposit via {channel}.",
+        facts,
+    )
 
 
 async def ministerial_directives_screen(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -709,27 +870,36 @@ async def ministerial_directives_screen(txn: dict, customer: dict, params: dict,
     """
     counterparty = txn.get("counterparty") or {}
     country = (counterparty.get("country") or "").upper().strip()
+    facts = [{"label": "Counterparty country", "value": country or "Not provided"}]
 
     if country in ("RU", "RUS"):
-        return {
-            "result": "no_pass",
-            "evidence": "Transaction bound for or originating from Russia; prohibited without enhanced verification under Ministerial Directive (Feb 24, 2024)."
-        }
+        return _outcome(
+            "no_pass",
+            "Transaction bound for or originating from Russia; prohibited without enhanced verification under Ministerial Directive (Feb 24, 2024).",
+            "Under the Canadian Ministerial Directive on Russia (Feb 24, 2024, PCMLTFA s. 11.42), transactions involving Russia are subject to mandatory restrictions and enhanced verification. This is a statutory rule and cannot be overridden.",
+            facts,
+        )
     if country in ("IR", "IRN"):
-        return {
-            "result": "no_pass",
-            "evidence": "Transaction associated with the Islamic Republic of Iran; prohibited under Ministerial Directive on Iran."
-        }
+        return _outcome(
+            "no_pass",
+            "Transaction associated with the Islamic Republic of Iran; prohibited under Ministerial Directive on Iran.",
+            "Under the Canadian Ministerial Directive on Iran (PCMLTFA s. 11.42), transactions associated with Iran are prohibited. This is a mandatory statutory rule and cannot be overridden.",
+            facts,
+        )
     if country in ("KP", "PRK"):
-        return {
-            "result": "no_pass",
-            "evidence": "Transaction associated with the Democratic People's Republic of Korea (DPRK); prohibited under Ministerial Directive (Dec 9, 2017)."
-        }
+        return _outcome(
+            "no_pass",
+            "Transaction associated with the Democratic People's Republic of Korea (DPRK); prohibited under Ministerial Directive (Dec 9, 2017).",
+            "Under the Canadian Ministerial Directive on the DPRK (Dec 9, 2017, PCMLTFA s. 11.42), transactions associated with North Korea are strictly prohibited and cannot be overridden.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": "No transactions associated with jurisdictions subject to Canadian Ministerial Directives (Russia, Iran, DPRK)."
-    }
+    return _outcome(
+        "pass",
+        "No transactions associated with jurisdictions subject to Canadian Ministerial Directives (Russia, Iran, DPRK).",
+        "The counterparty jurisdiction is not subject to any active Canadian Ministerial Directives under PCMLTFA s. 11.42 (Russia, Iran, DPRK).",
+        facts,
+    )
 
 
 async def interac_limits_check(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -740,19 +910,29 @@ async def interac_limits_check(txn: dict, customer: dict, params: dict, db: Any 
     - Commercial/Business: max $10,000 CAD
     """
     amount = float(txn.get("amount", 0))
-    is_commercial = customer and customer.get("segment") in ("business", "commercial", "payroll", "import/export")
+    segment = customer.get("segment") if customer else None
+    is_commercial = customer and segment in ("business", "commercial", "payroll", "import/export")
     single_limit = params.get("single_limit", 10000 if is_commercial else 3000)
+    facts = [
+        {"label": "Transfer amount", "value": f"CAD {amount:,.2f}"},
+        {"label": "Customer segment", "value": str(segment or "retail")},
+        {"label": "Single-txn limit", "value": f"CAD {float(single_limit):,.2f}"},
+    ]
 
     if amount > single_limit:
-        return {
-            "result": "no_pass",
-            "evidence": f"Interac e-Transfer amount CAD {amount:,.2f} exceeds allowable single-transaction limit of CAD {single_limit:,.2f} (Interac Operating Rules)."
-        }
+        return _outcome(
+            "no_pass",
+            f"Interac e-Transfer amount CAD {amount:,.2f} exceeds allowable single-transaction limit of CAD {single_limit:,.2f} (Interac Operating Rules).",
+            f"The Interac e-Transfer amount (CAD {amount:,.2f}) exceeds the single-transaction limit of CAD {float(single_limit):,.2f} for the '{segment or 'retail'}' segment under Interac Operating Rules.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Interac e-Transfer amount CAD {amount:,.2f} is within operating threshold (limit CAD {single_limit:,.2f})."
-    }
+    return _outcome(
+        "pass",
+        f"Interac e-Transfer amount CAD {amount:,.2f} is within operating threshold (limit CAD {single_limit:,.2f}).",
+        f"The Interac e-Transfer amount (CAD {amount:,.2f}) is within the CAD {float(single_limit):,.2f} single-transaction limit.",
+        facts,
+    )
 
 
 async def interac_velocity_check(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -764,17 +944,25 @@ async def interac_velocity_check(txn: dict, customer: dict, params: dict, db: An
     type_spec = txn.get("type_specific") or {}
     new_recipient = type_spec.get("new_recipient", False)
     velocity_1h = type_spec.get("transfers_past_hour", 0)
+    facts = [
+        {"label": "New recipient", "value": "Yes" if new_recipient else "No"},
+        {"label": "Transfers in past hour", "value": str(velocity_1h)},
+    ]
 
     if new_recipient and velocity_1h >= 3:
-        return {
-            "result": "flag",
-            "evidence": f"Rapid velocity burst ({velocity_1h} transfers in 1 hour) to new recipient; flagged for Account Takeover (ATO) fraud review."
-        }
+        return _outcome(
+            "flag",
+            f"Rapid velocity burst ({velocity_1h} transfers in 1 hour) to new recipient; flagged for Account Takeover (ATO) fraud review.",
+            f"The customer initiated {velocity_1h} Interac e-Transfers within 1 hour to a newly added recipient. Under CAFC and Interac Security Guidelines, this pattern indicates potential account takeover and is flagged for review.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": "Interac velocity metrics within standard baseline."
-    }
+    return _outcome(
+        "pass",
+        "Interac velocity metrics within standard baseline.",
+        "Interac e-Transfer velocity and recipient novelty are within normal baseline thresholds.",
+        facts,
+    )
 
 
 async def large_cash_threshold(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -785,17 +973,25 @@ async def large_cash_threshold(txn: dict, customer: dict, params: dict, db: Any 
     """
     threshold = params.get("threshold", 10000)
     amount = float(txn.get("amount", 0))
+    facts = [
+        {"label": "Cash amount", "value": f"CAD {amount:,.2f}"},
+        {"label": "LCTR threshold", "value": f"CAD {float(threshold):,.2f}"},
+    ]
 
     if amount >= threshold:
-        return {
-            "result": "flag",
-            "evidence": f"Cash transaction of CAD {amount:,.2f} meets or exceeds $10,000 threshold for mandatory FINTRAC LCTR reporting within 15 calendar days."
-        }
+        return _outcome(
+            "flag",
+            f"Cash transaction of CAD {amount:,.2f} meets or exceeds $10,000 threshold for mandatory FINTRAC LCTR reporting within 15 calendar days.",
+            f"Cash transactions of CAD {float(threshold):,.2f} or more trigger a mandatory Large Cash Transaction Report (LCTR) to FINTRAC within 15 calendar days under PCMLTFA s. 9. This is a reporting flag rather than a hard block.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Cash amount CAD {amount:,.2f} is below $10,000 LCTR threshold."
-    }
+    return _outcome(
+        "pass",
+        f"Cash amount CAD {amount:,.2f} is below $10,000 LCTR threshold.",
+        f"The cash amount (CAD {amount:,.2f}) is below the CAD {float(threshold):,.2f} LCTR reporting threshold.",
+        facts,
+    )
 
 
 async def virtual_currency_threshold(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -806,17 +1002,25 @@ async def virtual_currency_threshold(txn: dict, customer: dict, params: dict, db
     """
     threshold = params.get("threshold", 10000)
     amount = float(txn.get("amount", 0))
+    facts = [
+        {"label": "Virtual currency amount", "value": f"CAD {amount:,.2f}"},
+        {"label": "LVCTR threshold", "value": f"CAD {float(threshold):,.2f}"},
+    ]
 
     if amount >= threshold:
-        return {
-            "result": "flag",
-            "evidence": f"Virtual currency transfer of CAD {amount:,.2f} meets or exceeds $10,000 threshold for mandatory FINTRAC LVCTR reporting within 5 business days."
-        }
+        return _outcome(
+            "flag",
+            f"Virtual currency transfer of CAD {amount:,.2f} meets or exceeds $10,000 threshold for mandatory FINTRAC LVCTR reporting within 5 business days.",
+            f"Virtual currency transfers of CAD {float(threshold):,.2f} or more require a mandatory Large Virtual Currency Transaction Report (LVCTR) to FINTRAC within 5 business days under PCMLTFA Regulations s. 127.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Virtual currency amount CAD {amount:,.2f} is below $10,000 LVCTR threshold."
-    }
+    return _outcome(
+        "pass",
+        f"Virtual currency amount CAD {amount:,.2f} is below $10,000 LVCTR threshold.",
+        f"The virtual currency transfer (CAD {amount:,.2f}) is below the CAD {float(threshold):,.2f} LVCTR reporting threshold.",
+        facts,
+    )
 
 
 async def currency_clearing_check(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
@@ -826,16 +1030,108 @@ async def currency_clearing_check(txn: dict, customer: dict, params: dict, db: A
     for direct ACSS/Lynx clearing.
     """
     currency = (txn.get("currency") or "CAD").upper().strip()
+    facts = [{"label": "Currency", "value": currency}]
     if currency not in ("CAD", "USD"):
-        return {
-            "result": "no_pass",
-            "evidence": f"Currency '{currency}' is ineligible for direct Canadian ACSS clearing (Payments Canada Rule A1)."
-        }
+        return _outcome(
+            "no_pass",
+            f"Currency '{currency}' is ineligible for direct Canadian ACSS clearing (Payments Canada Rule A1).",
+            f"Only CAD and USD instruments are eligible for direct Canadian ACSS/Lynx clearing under Payments Canada Rule A1. Currency '{currency}' must be rejected or rerouted through an international correspondent.",
+            facts,
+        )
 
-    return {
-        "result": "pass",
-        "evidence": f"Currency '{currency}' is eligible for domestic clearing."
-    }
+    return _outcome(
+        "pass",
+        f"Currency '{currency}' is eligible for domestic clearing.",
+        f"Currency '{currency}' is eligible for direct Canadian ACSS/Lynx clearing under Payments Canada Rule A1.",
+        facts,
+    )
+
+
+async def amount_mismatch_check(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
+    """
+    Criterion A-01 (Hard):
+    Detects discrepancies between the processed transaction amount and the source
+    document amount (or cheque written vs. presented amount).
+    """
+    type_spec = txn.get("type_specific") or {}
+    amount = float(txn.get("amount", 0))
+    source_amt = type_spec.get("source_document_amount_cad")
+    facts = [{"label": "Processed amount", "value": f"CAD {amount:,.2f}"}]
+    if source_amt is not None:
+        facts.append({"label": "Source document amount", "value": f"CAD {float(source_amt):,.2f}"})
+
+    if source_amt is not None and abs(amount - float(source_amt)) > 0.01:
+        diff = abs(amount - float(source_amt))
+        return _outcome(
+            "no_pass",
+            f"Amount mismatch: processed CAD {amount:,.2f} differs from source document CAD {float(source_amt):,.2f} (diff CAD {diff:,.2f}).",
+            f"The processed amount (CAD {amount:,.2f}) does not match the source document amount (CAD {float(source_amt):,.2f}), leaving a discrepancy of CAD {diff:,.2f}. Amount mismatches must be resolved before clearing.",
+            facts,
+        )
+
+    written_amt = type_spec.get("cheque_written_amount_cad")
+    presented_amt = type_spec.get("cheque_presented_amount_cad")
+    if written_amt is not None and presented_amt is not None:
+        facts.extend([
+            {"label": "Cheque written amount", "value": f"CAD {float(written_amt):,.2f}"},
+            {"label": "Cheque presented amount", "value": f"CAD {float(presented_amt):,.2f}"},
+        ])
+        if abs(float(written_amt) - float(presented_amt)) > 0.01:
+            diff = abs(float(written_amt) - float(presented_amt))
+            return _outcome(
+                "no_pass",
+                f"Cheque amount mismatch: written CAD {float(written_amt):,.2f} vs presented CAD {float(presented_amt):,.2f} (diff CAD {diff:,.2f}).",
+                f"The written amount on the cheque (CAD {float(written_amt):,.2f}) differs from the presented amount (CAD {float(presented_amt):,.2f}) by CAD {diff:,.2f}. The item cannot clear until reconciled.",
+                facts,
+            )
+
+    return _outcome(
+        "pass",
+        f"Transaction amount CAD {amount:,.2f} matches source documentation.",
+        f"The processed transaction amount (CAD {amount:,.2f}) matches all available source documentation.",
+        facts,
+    )
+
+
+async def compliance_risk_screen(txn: dict, customer: dict, params: dict, db: Any = None) -> dict:
+    """
+    Criterion S-01 (Hard):
+    Screens deterministic compliance/risk flags on the payment payload
+    (active risk_flag, compliance_cleared=False, or beneficiary name mismatch).
+    """
+    type_spec = txn.get("type_specific") or {}
+    risk_flag = bool(type_spec.get("risk_flag", False))
+    compliance_cleared = type_spec.get("compliance_cleared")
+    name_matches = type_spec.get("beneficiary_name_matches_receiver")
+
+    facts = [
+        {"label": "Risk flag", "value": "True" if risk_flag else "False"},
+        {"label": "Compliance cleared", "value": str(compliance_cleared) if compliance_cleared is not None else "Not set"},
+        {"label": "Beneficiary name match", "value": str(name_matches) if name_matches is not None else "Not set"},
+    ]
+
+    issues: List[str] = []
+    if risk_flag:
+        issues.append("risk_flag=true")
+    if compliance_cleared is False:
+        issues.append("compliance_cleared=false")
+    if name_matches is False:
+        issues.append("beneficiary_name_matches_receiver=false")
+
+    if issues:
+        return _outcome(
+            "no_pass",
+            f"Deterministic compliance screening failed: {', '.join(issues)} (PCMLTFA s. 7).",
+            f"Deterministic compliance screening flagged {', '.join(issues)} on the payment payload under PCMLTFA s. 7. These compliance flags cannot be overridden and require remediation or rejection.",
+            facts,
+        )
+
+    return _outcome(
+        "pass",
+        "Transaction cleared deterministic risk and compliance flags.",
+        "No deterministic risk flags, compliance blocks, or beneficiary name mismatches were present on the payment payload.",
+        facts,
+    )
 
 # ---------------------------------------------------------------------------
 # 5. CHECKS Registry (Contracts §5.3)
@@ -855,41 +1151,78 @@ CHECKS: Dict[str, Callable[[dict, dict, dict, Any], Awaitable[dict]]] = {
     "large_cash_threshold": large_cash_threshold,
     "virtual_currency_threshold": virtual_currency_threshold,
     "currency_clearing_check": currency_clearing_check,
+    "amount_mismatch_check": amount_mismatch_check,
+    "compliance_risk_screen": compliance_risk_screen,
 }
 
 # ---------------------------------------------------------------------------
 # 6. Default Policy Checklists (Contracts §3.4 & Plan-Scenarios §Policies)
 # ---------------------------------------------------------------------------
+_COMMON_RULES = [
+    {"rule_id": "D-01", "role": "analyst", "max_amount": 50000, "can_override_hard_fail": False},
+    {"rule_id": "D-02", "role": "supervisor", "max_amount": None, "can_override_hard_fail": False},
+]
+
+_SHARED_HARD_CRITERIA = [
+    {
+        "id": "C-01",
+        "description": "Counterparty not on a sanctions list",
+        "kind": "hard",
+        "check": "sanctions_screen",
+        "params": {"names": DEFAULT_SANCTIONED_NAMES},
+        "regulation_ref": "Canadian sanctions law (SEMA / OSFI / PCMLTFA s. 7.1)",
+    },
+    {
+        "id": "C-02",
+        "description": "Customer account active and in good standing",
+        "kind": "hard",
+        "check": "account_ok",
+        "params": {},
+        "regulation_ref": "Bank Act / PCMLTFA KYC Provisions",
+    },
+    {
+        "id": "C-03",
+        "description": "No duplicate transaction within clearing window",
+        "kind": "hard",
+        "check": "duplicate",
+        "params": {"lookback_days": 30},
+        "regulation_ref": "Payments Canada Rule A4",
+    },
+    {
+        "id": "A-01",
+        "description": "Processed amount matches source documentation",
+        "kind": "hard",
+        "check": "amount_mismatch_check",
+        "params": {},
+        "regulation_ref": "Payments Canada Rule A4 / Reconciliation Controls",
+    },
+    {
+        "id": "S-01",
+        "description": "Deterministic risk and compliance flags cleared",
+        "kind": "hard",
+        "check": "compliance_risk_screen",
+        "params": {},
+        "regulation_ref": "PCMLTFA s. 7",
+    },
+]
+
+_JUDGMENT_AMOUNT = {
+    "id": "C-04",
+    "description": "Amount consistent with the customer's usual profile",
+    "kind": "judgment",
+    "check": None,
+    "params": {"ratio_hint": 3},
+    "regulation_ref": "FINTRAC suspicious-transaction indicators",
+}
+
 DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
     "wire": {
         "txn_type": "wire",
         "version": 1,
         "active": True,
+        "decision_rules": _COMMON_RULES,
         "criteria": [
-            {
-                "id": "C-01",
-                "description": "Counterparty not on a sanctions list",
-                "kind": "hard",
-                "check": "sanctions_screen",
-                "params": {"names": DEFAULT_SANCTIONED_NAMES},
-                "regulation_ref": "Canadian sanctions law (SEMA / OSFI / PCMLTFA s. 7.1)"
-            },
-            {
-                "id": "C-02",
-                "description": "Customer account active and in good standing",
-                "kind": "hard",
-                "check": "account_ok",
-                "params": {},
-                "regulation_ref": "Bank Act / PCMLTFA KYC Provisions"
-            },
-            {
-                "id": "C-03",
-                "description": "No duplicate transaction within clearing window",
-                "kind": "hard",
-                "check": "duplicate",
-                "params": {"lookback_days": 30},
-                "regulation_ref": "Payments Canada Rule A4"
-            },
+            *_SHARED_HARD_CRITERIA,
             {
                 "id": "W-01",
                 "description": "Originator and beneficiary information complete",
@@ -922,14 +1255,7 @@ DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
                 "params": {},
                 "regulation_ref": "Payments Canada Lynx Rules"
             },
-            {
-                "id": "C-04",
-                "description": "Amount consistent with the customer's usual profile",
-                "kind": "judgment",
-                "check": None,
-                "params": {"ratio_hint": 3},
-                "regulation_ref": "FINTRAC suspicious-transaction indicators"
-            },
+            _JUDGMENT_AMOUNT,
             {
                 "id": "W-03",
                 "description": "Payment purpose and routing consistency",
@@ -944,31 +1270,9 @@ DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
         "txn_type": "cheque",
         "version": 1,
         "active": True,
+        "decision_rules": _COMMON_RULES,
         "criteria": [
-            {
-                "id": "C-01",
-                "description": "Counterparty not on a sanctions list",
-                "kind": "hard",
-                "check": "sanctions_screen",
-                "params": {"names": DEFAULT_SANCTIONED_NAMES},
-                "regulation_ref": "Canadian sanctions law (SEMA / OSFI / PCMLTFA s. 7.1)"
-            },
-            {
-                "id": "C-02",
-                "description": "Customer account active and in good standing",
-                "kind": "hard",
-                "check": "account_ok",
-                "params": {},
-                "regulation_ref": "Bank Act / PCMLTFA KYC Provisions"
-            },
-            {
-                "id": "C-03",
-                "description": "No duplicate transaction within clearing window",
-                "kind": "hard",
-                "check": "duplicate",
-                "params": {"lookback_days": 30},
-                "regulation_ref": "Payments Canada Rule A4"
-            },
+            *_SHARED_HARD_CRITERIA,
             {
                 "id": "Q-01",
                 "description": "Cheque date is valid (not stale-dated > 180 days, not post-dated)",
@@ -993,29 +1297,16 @@ DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
                 "params": {},
                 "regulation_ref": "Payments Canada Rule A1"
             },
-            {
-                "id": "C-04",
-                "description": "Amount consistent with the customer's usual profile",
-                "kind": "judgment",
-                "check": None,
-                "params": {"ratio_hint": 3},
-                "regulation_ref": "FINTRAC suspicious-transaction indicators"
-            }
+            _JUDGMENT_AMOUNT,
         ]
     },
     "interac": {
         "txn_type": "interac",
         "version": 1,
         "active": True,
+        "decision_rules": _COMMON_RULES,
         "criteria": [
-            {
-                "id": "C-01",
-                "description": "Counterparty not on a sanctions list",
-                "kind": "hard",
-                "check": "sanctions_screen",
-                "params": {"names": DEFAULT_SANCTIONED_NAMES},
-                "regulation_ref": "Canadian sanctions law"
-            },
+            *_SHARED_HARD_CRITERIA,
             {
                 "id": "I-01",
                 "description": "Interac e-Transfer within statutory and operating limits",
@@ -1032,16 +1323,55 @@ DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
                 "params": {},
                 "regulation_ref": "CAFC & Interac Fraud Guidelines"
             },
-            {
-                "id": "C-04",
-                "description": "Amount consistent with the customer's usual profile",
-                "kind": "judgment",
-                "check": None,
-                "params": {"ratio_hint": 3},
-                "regulation_ref": "FINTRAC suspicious-transaction indicators"
-            }
+            _JUDGMENT_AMOUNT,
         ]
-    }
+    },
+    "eft": {
+        "txn_type": "eft",
+        "version": 1,
+        "active": True,
+        "decision_rules": _COMMON_RULES,
+        "criteria": [
+            *_SHARED_HARD_CRITERIA,
+            {
+                "id": "R-01",
+                "description": "Currency eligible for domestic ACSS clearing (CAD/USD)",
+                "kind": "hard",
+                "check": "currency_clearing_check",
+                "params": {},
+                "regulation_ref": "Payments Canada Rule A1"
+            },
+            _JUDGMENT_AMOUNT,
+        ]
+    },
+    "pad": {
+        "txn_type": "pad",
+        "version": 1,
+        "active": True,
+        "decision_rules": _COMMON_RULES,
+        "criteria": [
+            *_SHARED_HARD_CRITERIA,
+            {
+                "id": "R-01",
+                "description": "Currency eligible for domestic ACSS PAD clearing (CAD/USD)",
+                "kind": "hard",
+                "check": "currency_clearing_check",
+                "params": {},
+                "regulation_ref": "Payments Canada Rule H1"
+            },
+            _JUDGMENT_AMOUNT,
+        ]
+    },
+    "bill_payment": {
+        "txn_type": "bill_payment",
+        "version": 1,
+        "active": True,
+        "decision_rules": _COMMON_RULES,
+        "criteria": [
+            *_SHARED_HARD_CRITERIA,
+            _JUDGMENT_AMOUNT,
+        ]
+    },
 }
 
 # ---------------------------------------------------------------------------
