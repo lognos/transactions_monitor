@@ -307,20 +307,20 @@ export default function Home() {
       {error && <div role="alert" className="border-b border-status-negative-border bg-status-negative-bg px-5 py-3 text-status-negative-fg">{messageOf(error)}</div>}
 
       {!principalId ? <div className="flex flex-1 items-center justify-center p-6">
-        <section aria-labelledby="login-title" className="flex w-max max-w-full flex-col items-center gap-8">
-          <div className="flex items-center gap-4">
-            <AuditFlowMark className="size-14" />
-            <span className="text-3xl font-medium tracking-tight">auditflow ai</span>
+        <section aria-labelledby="login-title" className="flex w-full max-w-sm flex-col items-center gap-8">
+          <div className="flex w-full items-center justify-between gap-4">
+            <AuditFlowMark className="size-16 sm:size-20" />
+            <span className="whitespace-nowrap text-4xl font-medium tracking-tight sm:text-5xl">auditflow ai</span>
           </div>
           <h2 id="login-title" className="sr-only">Sign in</h2>
           {principals.isPending && <p role="status" className="flex items-center gap-2 text-sm text-text-muted"><LoaderCircle className="size-4 animate-spin" aria-hidden="true" />Loading…</p>}
           {principals.data && !people.length && <p className="text-sm text-text-muted">No identities are seeded yet.</p>}
-          <ul className="flex w-0 min-w-full flex-col gap-3">
+          <ul className="flex w-full flex-col gap-3">
             {people.map((person) => <li key={person._id}>
               <button type="button" onClick={() => logIn(person._id)}
                 className="flex w-full items-center justify-center gap-3 rounded-lg border border-border-default bg-surface-2/50 px-6 py-4 text-sm text-text-default backdrop-blur-sm transition-all duration-200 hover:bg-surface-3/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus">
                 <MicrosoftLogo className="size-5 shrink-0" />
-                <span className="font-light" style={{ fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+                <span className="whitespace-nowrap font-light" style={{ fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
                   Sign in as {person.name}<span className="text-text-muted capitalize"> · {person.role}</span>
                 </span>
               </button>
