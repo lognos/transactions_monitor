@@ -110,7 +110,10 @@ Index: unique on `{txn_type: 1, version: 1}`.
   "checks": [
     { "criterion_id": "W-01", "description": "Originator and beneficiary information complete",
       "kind": "hard", "source": "rule", "result": "no_pass",
-      "evidence": "counterparty.address is missing", "regulation_ref": "FINTRAC travel rule",
+      "evidence": "counterparty.address is missing",
+      "explanation": "The travel rule requires the beneficiary's name, address and account number to travel with a wire. The address is missing, so the wire cannot proceed until it is corrected. This is a mandatory rule and no reviewer can override it.",
+      "facts": [ { "label": "Beneficiary name", "value": "Northwind Trading" }, { "label": "Beneficiary address", "value": "Missing" } ],
+      "regulation_ref": "FINTRAC travel rule",
       "precedents_used": [], "adjustments_used": [] }
   ],
   "recommendation": "no_pass",
@@ -126,8 +129,9 @@ Index: unique on `{txn_type: 1, version: 1}`.
   "created_at": "2026-11-14T14:03:00Z"
 }
 ```
-- `status`: `awaiting_review` or `decided`.
+- `status`: `awaiting_review`, `decided`, or `superseded` (replaced by a newer evaluation of the same transaction after a refresh).
 - Top-level `precedents_used` and `adjustments_used` are the union of the per-check lists.
+- Each check carries three levels of detail. `evidence` is one line for the checklist row. `explanation` is two to four sentences for the references dialog saying why the check passed, failed or was flagged, in words a reviewer can repeat to an auditor. `facts` lists the values that were examined (`label`, `value` as display strings). Hard checks produce all three in code; judgment checks get `evidence` and `explanation` from the LLM and `facts` from the node.
 
 Index: unique on `eval_id`; `{txn_id: 1}`.
 
@@ -202,14 +206,17 @@ Base URL `http://localhost:8010` (port 8000 is taken on some of our machines). J
 
 | # | Method and path | Purpose |
 | --- | --- | --- |
-| 1 | `GET /principals` | Fill the "acting as" dropdown |
-| 2 | `GET /transactions?status=pending` | Queue |
-| 3 | `POST /transactions/{txn_id}/evaluate` | Run the Evaluate graph |
-| 4 | `GET /evaluations/{eval_id}` | Reload a review card |
-| 5 | `POST /evaluations/{eval_id}/ask` | Ask a question |
+| 1 | `GET /principals` | Fill the login screen. The only call that needs no `X-Principal-Id` |
+| 2 | `GET /transactions?status=pending` | Transactions list, each with the agent's latest recommendation |
+| 3 | `POST /transactions/{txn_id}/evaluate` | Run the Evaluate graph for one transaction (`?refresh=true` to redo it) |
+| 4 | `GET /evaluations/{eval_id}` | Checks dialog |
+| 5 | `POST /evaluations/{eval_id}/ask` | Chat about one transaction |
 | 6 | `POST /evaluations/{eval_id}/decide` | Validate or reject |
 | 7 | `GET /audit?txn_id=TXN-0003` | Timeline for one transaction (omit `txn_id` for all) |
 | 8 | `GET /audit/verify` | Verify the hash chain |
+| 9 | `POST /transactions/evaluate-pending` | Evaluate every pending transaction so the list shows recommendations |
+| 10 | `GET /evaluations/{eval_id}/checks/{criterion_id}/references` | References dialog for one check |
+| 11 | `POST /chat` | Chat with no transaction in focus |
 
 ### Responses
 
@@ -217,15 +224,16 @@ Base URL `http://localhost:8010` (port 8000 is taken on some of our machines). J
 ```json
 { "transactions": [ { "txn_id": "TXN-0001", "type": "wire", "amount": 4000, "currency": "CAD",
     "customer_name": "Harbour Dental", "counterparty_name": "Medisupply Inc", "memo": "…",
-    "status": "pending", "eval_id": null, "created_at": "…" } ] }
+    "status": "awaiting_review", "eval_id": "EVAL-3fa91c20", "recommendation": "no_pass",
+    "failed_checks": ["W-01", "C-04"], "created_at": "…" } ] }
 ```
-`eval_id` is the latest evaluation for the transaction, or `null`.
+`eval_id`, `recommendation` and `failed_checks` come from the latest evaluation that is not `superseded`. All three are `null` / `[]` for a transaction that has not been evaluated.
 
 **3 `POST /transactions/{txn_id}/evaluate`** (no body) → `200` an `evaluations` document (§3.5) plus:
 ```json
 { "transaction": { "…full transaction…" }, "customer": { "customer_id": "…", "name": "…", "segment": "…", "typical_amount": 2500 } }
 ```
-Calling it again on a transaction that is `awaiting_review` returns the existing evaluation.
+Calling it again on a transaction that is `awaiting_review` returns the existing evaluation. With `?refresh=true` it runs a new evaluation and marks the old one `superseded`. A decided transaction is never re-evaluated.
 
 **4 `GET /evaluations/{eval_id}`** → same shape as 3, plus `"decision": {…} | null`.
 
@@ -259,6 +267,42 @@ Calling it again on a transaction that is `awaiting_review` returns the existing
 ```json
 { "ok": false, "checked": 23, "broken_at_seq": 12, "reason": "hash mismatch" }
 ```
+
+**9 `POST /transactions/evaluate-pending`**
+```json
+{ "refresh": false }
+```
+Evaluates every `pending` transaction. With `"refresh": true` it also re-evaluates those `awaiting_review`, which is how a new adjustment reaches transactions already in the list. Runs the evaluations concurrently. → `200`
+```json
+{ "evaluated": [ { "txn_id": "TXN-0004", "eval_id": "EVAL-77c1d0aa", "recommendation": "pass", "changed": true } ],
+  "failed": [ { "txn_id": "TXN-0005", "error": "…" } ] }
+```
+`changed` is true when the recommendation differs from the superseded evaluation.
+
+**10 `GET /evaluations/{eval_id}/checks/{criterion_id}/references`** → `200`
+```json
+{
+  "check": { "criterion_id": "C-04", "result": "pass", "source": "llm", "evidence": "…",
+    "explanation": "The amount is 3.4 times this customer's typical payment, which would normally fail. Ana's guidance says payroll customers spike at month-end; this is a payroll customer and the cheque is dated at month-end, so the guidance applies and the check passes.",
+    "facts": [ { "label": "Amount", "value": "CAD 9,400" }, { "label": "Typical amount", "value": "CAD 2,800" }, { "label": "Ratio", "value": "3.4x" } ] },
+  "policy": { "txn_type": "cheque", "version": 1, "criterion_id": "C-04",
+    "description": "Amount consistent with the customer's usual profile", "kind": "judgment",
+    "regulation_ref": "FINTRAC suspicious-transaction indicators", "params": { "ratio_hint": 3 } },
+  "adjustments": [ { "memory_id": "MEM-5e6f7a8b", "text": "…", "condition": "…",
+    "author_id": "ana", "author_name": "Ana", "source_txn_id": "TXN-0003", "created_at": "…" } ],
+  "precedents": [ { "memory_id": "MEM-11aa22bb", "text": "…", "author_id": "seed", "author_name": null,
+    "source_txn_id": null, "verdict": null, "created_at": "…" } ]
+}
+```
+Read-only, built by the server from `evaluations`, `policies`, `memory` and `decisions`. `adjustments` and `precedents` are the ones that check used; both are empty for most hard checks. `verdict` is the reviewer verdict of the source decision when there is one.
+
+**11 `POST /chat`**
+```json
+{ "message": "What is our rule for wires over $10,000?" }
+```
+→ `200` `{ "answer": "…", "citations": [ { "type": "policy", "ref": "W-02", "label": "…" } ] }`
+
+General questions answered from policies and memory, with no transaction in focus. The UI keeps this conversation in the page; it is not stored. Audited as `question.answered` with `txn_id: null`. When a transaction is in focus the UI calls `/evaluations/{eval_id}/ask` instead.
 
 ### Errors
 All errors use `{ "error": { "code": "...", "message": "..." } }`.
@@ -301,7 +345,8 @@ Deny, in this order:
 ### 5.3 Deterministic checks
 ```python
 CheckFn = Callable[[dict, dict, dict, Db], Awaitable[CheckOutcome]]   # (txn, customer, params, db)
-# CheckOutcome: {"result": "pass" | "no_pass" | "flag", "evidence": str}
+# CheckOutcome: {"result": "pass" | "no_pass" | "flag", "evidence": str,
+#                "explanation": str, "facts": [{"label": str, "value": str}]}
 CHECKS: dict[str, CheckFn]
 ```
 
@@ -325,10 +370,14 @@ async def active_adjustments(*, txn_type: str) -> list[dict]   # plain find, no 
 ```
 
 ### 5.5 Agent entry points
-The only two functions the server imports from `app.agent`. Owned by the Agent lane.
+The only three functions the server imports from `app.agent`. Owned by the Agent lane.
 ```python
-async def run_evaluate(*, txn_id: str, principal_id: str) -> dict
+async def run_evaluate(*, txn_id: str, principal_id: str, refresh: bool = False) -> dict
 # -> {"evaluation", "transaction", "customer"}
+# refresh=True: write a new evaluation and mark the previous awaiting_review one "superseded".
+
+async def run_chat(*, message: str, principal_id: str) -> dict
+# -> {"answer": str, "citations": [...]}   general question, no transaction in focus
 
 async def run_review(*, eval_id: str, principal_id: str, review_input: dict) -> dict
 # review_input: {"kind": "question", "question": str}
@@ -347,6 +396,7 @@ Pydantic models passed to `with_structured_output`. The LLM never writes to the 
 {
   "judgment_checks": [
     { "criterion_id": "C-04", "result": "no_pass", "evidence": "Amount is 3.6x the typical amount and the payee is new.",
+      "explanation": "Two to four sentences: what was compared, which precedent or adjustment decided it, and what would change the result.",
       "precedents_used": ["MEM-11aa22bb"], "adjustments_used": [] }
   ],
   "rationale": "One or two sentences for the reviewer."

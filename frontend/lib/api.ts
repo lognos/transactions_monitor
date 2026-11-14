@@ -4,21 +4,55 @@
 import type {
   AskResponse,
   AuditEvent,
+  ChatResponse,
   DecideResponse,
   Evaluation,
+  EvaluatePendingResponse,
   Gate,
   Health,
   Principal,
-  Transaction,
+  ReferencesResponse,
+  TransactionSummary,
   TxnStatus,
   Verdict,
   VerifyResponse,
 } from "./types";
+import { FixtureError, fixtures } from "./fixtures";
 
-let principalId: string | null = null;
+// Bootstrap requests also need a known identity before principals are loaded.
+let principalId = "ana";
 
 export function setPrincipal(id: string | null) {
-  principalId = id;
+  principalId = id || "ana";
+}
+
+type ApiSource = "fixture" | "backend";
+// Change any individual line to "backend" as that endpoint becomes available.
+// Set NEXT_PUBLIC_API_SOURCE=backend to start with every call on the real API.
+const defaultSource: ApiSource = process.env.NEXT_PUBLIC_API_SOURCE === "backend" ? "backend" : "fixture";
+export const apiSources: Record<
+  "health" | "principals" | "transactions" | "evaluate" | "evaluation" | "ask" |
+  "decide" | "audit" | "verifyChain" | "evaluatePending" | "references" | "chat",
+  ApiSource
+> = {
+  health: defaultSource,
+  principals: defaultSource,
+  transactions: defaultSource,
+  evaluate: defaultSource,
+  evaluation: defaultSource,
+  ask: defaultSource,
+  decide: defaultSource,
+  audit: defaultSource,
+  verifyChain: defaultSource,
+  evaluatePending: defaultSource,
+  references: defaultSource,
+  chat: defaultSource,
+};
+
+export function getApiMode(): "fixtures" | "backend" | "mixed" {
+  const sources = Object.values(apiSources);
+  return sources.every((source) => source === "fixture") ? "fixtures"
+    : sources.every((source) => source === "backend") ? "backend" : "mixed";
 }
 
 interface ErrorBody {
@@ -53,21 +87,38 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown):
   return data as T;
 }
 
+async function call<T>(name: keyof typeof apiSources, fixture: () => Promise<T>, backend: () => Promise<T>): Promise<T> {
+  try {
+    return await (apiSources[name] === "fixture" ? fixture() : backend());
+  } catch (error) {
+    if (error instanceof FixtureError) throw new ApiError(error.status, error.body);
+    throw error;
+  }
+}
+
+const pathId = encodeURIComponent;
+
 export const api = {
-  health: () => request<Health>("GET", "/health"),
-  principals: () => request<{ principals: Principal[] }>("GET", "/principals"),
+  health: () => call("health", fixtures.health, () => request<Health>("GET", "/health")),
+  principals: () => call("principals", fixtures.principals, () => request<{ principals: Principal[] }>("GET", "/principals")),
   transactions: (status?: TxnStatus) =>
-    request<{ transactions: Transaction[] }>(
-      "GET",
-      status ? `/transactions?status=${status}` : "/transactions",
-    ),
-  evaluate: (txnId: string) => request<Evaluation>("POST", `/transactions/${txnId}/evaluate`),
-  evaluation: (evalId: string) => request<Evaluation>("GET", `/evaluations/${evalId}`),
+    call("transactions", () => fixtures.transactions(principalId, status), () =>
+      request<{ transactions: TransactionSummary[] }>("GET", status ? `/transactions?status=${status}` : "/transactions")),
+  evaluate: (txnId: string, refresh = false) => call("evaluate", () => fixtures.evaluate(txnId, principalId, refresh), () =>
+    request<Evaluation>("POST", `/transactions/${pathId(txnId)}/evaluate${refresh ? "?refresh=true" : ""}`)),
+  evaluatePending: (refresh = false) => call("evaluatePending", () => fixtures.evaluatePending(principalId, refresh), () =>
+    request<EvaluatePendingResponse>("POST", "/transactions/evaluate-pending", { refresh })),
+  evaluation: (evalId: string) => call("evaluation", () => fixtures.evaluation(evalId), () =>
+    request<Evaluation>("GET", `/evaluations/${pathId(evalId)}`)),
+  references: (evalId: string, criterionId: string) => call("references", () => fixtures.references(evalId, criterionId), () =>
+    request<ReferencesResponse>("GET", `/evaluations/${pathId(evalId)}/checks/${pathId(criterionId)}/references`)),
   ask: (evalId: string, question: string) =>
-    request<AskResponse>("POST", `/evaluations/${evalId}/ask`, { question }),
+    call("ask", () => fixtures.ask(evalId, principalId, question), () => request<AskResponse>("POST", `/evaluations/${pathId(evalId)}/ask`, { question })),
+  chat: (message: string) => call("chat", () => fixtures.chat(principalId, message), () => request<ChatResponse>("POST", "/chat", { message })),
   decide: (evalId: string, verdict: Verdict, comments?: string) =>
-    request<DecideResponse>("POST", `/evaluations/${evalId}/decide`, { verdict, comments }),
+    call("decide", () => fixtures.decide(evalId, principalId, verdict, comments), () =>
+      request<DecideResponse>("POST", `/evaluations/${pathId(evalId)}/decide`, { verdict, comments })),
   audit: (txnId?: string) =>
-    request<{ events: AuditEvent[] }>("GET", txnId ? `/audit?txn_id=${txnId}` : "/audit"),
-  verifyChain: () => request<VerifyResponse>("GET", "/audit/verify"),
+    call("audit", () => fixtures.audit(txnId), () => request<{ events: AuditEvent[] }>("GET", txnId ? `/audit?txn_id=${pathId(txnId)}` : "/audit")),
+  verifyChain: () => call("verifyChain", fixtures.verifyChain, () => request<VerifyResponse>("GET", "/audit/verify")),
 };

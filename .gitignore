@@ -44,6 +44,7 @@ out/
 .next/
 next-env.d.ts
 *.tsbuildinfo
+.gstack/
 
 # Operating System & IDE
 .DS_Store

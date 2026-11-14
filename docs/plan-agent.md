@@ -10,6 +10,13 @@ Two small LangGraph graphs behind a FastAPI app:
 
 Done when the same kind of cheque gets a different recommendation after a reviewer comment, and the evaluation cites that comment.
 
+## Changes from the UI design (agree with the server owner)
+
+- `run_evaluate` takes `refresh: bool`. When true, `save_evaluation` writes a new evaluation and marks the previous `awaiting_review` one `superseded` in the same audited write.
+- New entry point `run_chat(message, principal_id)`: a general question with no transaction in focus. It reuses the Answer prompt with policies and a memory search as context, and audits `question.answered` with `txn_id: null`. No new graph is needed; one function is enough.
+- Every check carries `explanation` and `facts` as well as `evidence` (contracts §3.5). Each function in `checks.py` returns all three; add `explanation` to `JudgmentCheck` in `schemas.py` and ask for it in the Recommend prompt; `save_evaluation` fills `facts` for judgment checks (amount, typical amount, ratio, segment). The references dialog shows these, and falls back to `evidence` when they are missing.
+- The server evaluates the whole pending list concurrently, so nodes must not share mutable state between runs.
+
 ## Why LangGraph
 
 - `StateGraph` with typed state maps directly onto the node list we already have.
