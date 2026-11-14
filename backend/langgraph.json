@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "evaluate": "app.studio:evaluate_graph",
+    "review": "app.studio:review_graph"
+  },
+  "env": ".env"
+}
