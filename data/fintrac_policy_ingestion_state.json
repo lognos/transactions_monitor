@@ -1,13 +1,13 @@
 {
-  "last_synced_at": "2026-11-14T17:34:17.540007+00:00",
-  "total_policies": 172,
+  "last_synced_at": "2026-11-14T17:34:27.404345+00:00",
+  "total_policies": 173,
   "active_policies": 170,
-  "upcoming_policies": 0,
+  "upcoming_policies": 1,
   "expired_policies": 2,
   "csv_path": "/Users/epheriami/Downloads/Projects/mongodb/data/fintrac_policy_monitoring_catalog.csv",
   "vector_ingest_result": {
     "status": "DRY_RUN_COMPLETED",
-    "active_policies": 170,
+    "active_policies": 171,
     "expired_policies": 2,
     "purged_policies": 0
   }
