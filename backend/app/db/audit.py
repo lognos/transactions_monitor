@@ -21,7 +21,7 @@ class Write:
     """One insert or update to apply in the same transaction as the audit event."""
 
     collection: str
-    op: Literal["insert", "update"]
+    op: Literal["insert", "update", "update_many"]
     document: dict[str, Any] | None = None  # insert
     filter: dict[str, Any] | None = None  # update
     update: dict[str, Any] | None = None  # update, e.g. {"$set": {...}}
@@ -88,10 +88,11 @@ async def write_with_audit(
                 if w.document is None:
                     raise ValueError(f"Insert write on {w.collection} missing document")
                 await col.insert_one(dict(w.document), session=session)
-            elif w.op == "update":
+            elif w.op in ("update", "update_many"):
                 if w.filter is None or w.update is None:
                     raise ValueError(f"Update write on {w.collection} missing filter/update")
-                await col.update_one(w.filter, w.update, session=session)
+                apply = col.update_many if w.op == "update_many" else col.update_one
+                await apply(w.filter, w.update, session=session)
             else:
                 raise ValueError(f"Unsupported write op: {w.op}")
 

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from app.server.serialization import public_data
+from app.server.observability import record_server_error
 
 
 class ApiError(Exception):
@@ -31,10 +32,17 @@ def install_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        error_id = record_server_error(request, exc)
+        rate_limited = any(cls.__name__ == "ModelRateLimitError" for cls in type(exc).__mro__)
+        message = (
+            "The model provider's request limit was reached. Check its quota or wait for the limit to reset."
+            if rate_limited else "The request could not be completed."
+        )
         return JSONResponse(
-            {"error": {"code": "internal_error", "message": "The request could not be completed."}},
+            {"error": {"code": "internal_error", "message": f"{message} Reference: {error_id}"}},
             status_code=500,
+            headers={"X-Error-Id": error_id},
         )
 
     @app.exception_handler(RequestValidationError)

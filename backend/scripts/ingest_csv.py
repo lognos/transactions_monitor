@@ -27,9 +27,12 @@ async def main(csv_path: Path = DEFAULT_CSV) -> None:
         )
 
     for txn in txns:
+        # Re-ingesting must not send reviewed transactions back to "pending":
+        # that made the agent re-evaluate the whole table on the next page load.
+        fields = {k: v for k, v in txn.items() if k != "status"}
         await db.transactions.update_one(
             {"txn_id": txn["txn_id"]},
-            {"$set": txn},
+            {"$set": fields, "$setOnInsert": {"status": txn.get("status", "pending")}},
             upsert=True,
         )
 

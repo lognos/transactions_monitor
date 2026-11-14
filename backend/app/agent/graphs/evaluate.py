@@ -23,12 +23,14 @@ Invariants enforced:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.checks import CHECKS, DEFAULT_POLICIES
+from app.db.audit import Write
 from app.agent.graphs._deps import (
     agent_actor,
     make_insert,
@@ -44,6 +46,10 @@ from app.agent.schemas import RecommendOutput
 from app.db import get_db
 
 logger = logging.getLogger(__name__)
+
+
+class ModelUnavailableError(RuntimeError):
+    """The LLM could not be reached after retries; no evaluation was written."""
 
 
 # ---------------------------------------------------------------------------
@@ -197,31 +203,24 @@ async def recommend(state: EvalState) -> Dict[str, Any]:
 
     structured_llm = get_structured_llm(RecommendOutput)
 
+    # Retry with backoff (rate limits are the usual cause). If the model still
+    # cannot be reached, fail the evaluation: the transaction stays pending and
+    # the caller reports the error. A provider outage must never be stored as
+    # the agent's "no_pass" judgment.
     last_err: Exception | None = None
-    for attempt in range(2):
+    for attempt, delay in enumerate((0, 3, 8)):
+        if delay:
+            await asyncio.sleep(delay)
         try:
             output: RecommendOutput = await structured_llm.ainvoke(messages)
             return {"llm_output": output.model_dump()}
         except Exception as exc:
             last_err = exc
-            logger.warning("recommend LLM attempt %d failed: %s", attempt + 1, exc)
+            logger.warning("recommend LLM attempt %d failed: %s", attempt + 1, type(exc).__name__)
 
-    # Fallback per docs/plan-agent.md Risks: mark judgment checks no_pass on parse failure
-    fallback = RecommendOutput(
-        judgment_checks=[
-            {
-                "criterion_id": c["id"],
-                "result": "no_pass",
-                "evidence": f"model output invalid ({last_err})",
-                "explanation": f"Automatic judgment evaluation failed to parse model output ({last_err}); escalated for manual review.",
-                "precedents_used": [],
-                "adjustments_used": [],
-            }
-            for c in judgment_criteria
-        ],
-        rationale="Automatic evaluation failed to parse model judgment; escalated for manual review.",
-    )
-    return {"llm_output": fallback.model_dump()}
+    raise ModelUnavailableError(
+        f"The model could not evaluate the judgment criteria ({type(last_err).__name__})."
+    ) from last_err
 
 
 async def save_evaluation(state: EvalState) -> Dict[str, Any]:
@@ -232,7 +231,7 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
     txn = state["txn"]
     customer = state.get("customer") or {}
     policy = state["policy"]
-    principal_id = state.get("principal_id") or "ana"
+    principal_id = state["principal_id"]
     refresh = bool(state.get("refresh", False))
     hard_by_id = {c["criterion_id"]: c for c in state.get("checks", [])}
 
@@ -360,15 +359,15 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         "created_at": now,
     }
 
-    writes = []
-    if refresh:
-        writes.append(
-            make_update(
-                "evaluations",
-                {"txn_id": txn["txn_id"], "status": "awaiting_review"},
-                {"$set": {"status": "superseded"}},
-            )
+    # Exactly one live evaluation per transaction: any earlier undecided one is
+    # superseded, whether this run is a refresh or a re-evaluation of a re-queued item.
+    writes = [
+        Write(
+            collection="evaluations", op="update_many",
+            filter={"txn_id": txn["txn_id"], "status": "awaiting_review"},
+            update={"$set": {"status": "superseded"}},
         )
+    ]
     writes.extend([
         make_insert("evaluations", evaluation_doc),
         make_update(

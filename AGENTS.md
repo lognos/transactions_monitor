@@ -72,6 +72,8 @@ Variables are read from `.env` (not committed):
 | `GOOGLE_API_KEY` | LLM provider key |
 | `LLM_MODEL` | `<provider>:<model>` for `init_chat_model`, default `google_genai:gemini-2.5-flash` |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | LangSmith tracing |
+| `LOGFIRE_WRITE_TOKEN` (or `LOGFIRE_TOKEN`) | Optional Logfire server telemetry |
+| `QUEUE_LIMIT` | Open transactions shown in a reviewer's queue and pre-evaluated by the agent (default 8) |
 
 ## Commands
 

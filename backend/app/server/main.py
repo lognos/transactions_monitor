@@ -18,6 +18,7 @@ from app.db import close_client, get_db, ping
 from app.db.audit import verify_chain
 from app.server.deps import current_principal
 from app.server.errors import ApiError, install_error_handlers
+from app.server.observability import configure_observability
 from app.server.references import get_check_references, label_citations
 from app.server.schemas import (
     AskBody, ChatBody, DecideBody, EvaluatePendingBody, OverrideBody, SimulateBody,
@@ -41,6 +42,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 install_error_handlers(app)
+configure_observability(app)
 
 Principal = Depends(current_principal)
 
@@ -61,7 +63,12 @@ async def list_principals() -> dict[str, Any]:
     return {"principals": [{**public_data(p), "_id": p["_id"]} for p in principals]}
 
 
-async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
+OPEN_STATUSES = ["pending", "awaiting_review"]
+DECIDED_STATUSES = ["passed", "rejected"]
+
+
+async def _transaction_rows(query: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
+    """Newest first. `limit` is applied before the joins, so a large source table stays cheap."""
     cursor = await get_db().transactions.aggregate([
         # Raw CSV imports may share this collection, but they are not runnable
         # queue transactions until ingestion supplies the contracted fields.
@@ -73,7 +80,9 @@ async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
             "status": {"$in": ["pending", "awaiting_review", "passed", "rejected"]},
             "created_at": {"$type": ["date", "string"]},
         }]}},
-        {"$sort": {"created_at": 1, "txn_id": 1}},
+        {"$set": {"_queued": {"$ifNull": ["$queued_at", "$created_at"]}}},
+        {"$sort": {"_queued": -1, "txn_id": -1}},
+        *([{"$limit": limit}] if limit else []),
         {"$lookup": {
             "from": "customers", "localField": "customer_id",
             "foreignField": "customer_id", "as": "customer",
@@ -124,8 +133,15 @@ async def list_transactions(
     status: Literal["pending", "awaiting_review", "passed", "rejected"] | None = None,
     _: dict = Principal,
 ) -> dict[str, Any]:
-    query = {"status": status} if status else {}
-    return public_data({"transactions": await _transaction_rows(query)})
+    # The reviewer's queue is capped (QUEUE_LIMIT): the newest open transactions,
+    # then the most recently queued decided ones. The source table can be any size.
+    limit = settings.queue_limit
+    if status:
+        rows = await _transaction_rows({"status": status}, limit)
+    else:
+        rows = await _transaction_rows({"status": {"$in": OPEN_STATUSES}}, limit)
+        rows += await _transaction_rows({"status": {"$in": DECIDED_STATUSES}}, limit)
+    return public_data({"transactions": rows})
 
 
 def _require_refresh_support() -> None:
@@ -142,10 +158,14 @@ async def evaluate_pending(
     body: EvaluatePendingBody, principal: dict = Principal,
 ) -> dict[str, Any]:
     _require_refresh_support()
-    statuses = ["pending", "awaiting_review"] if body.refresh else ["pending"]
-    txns = await _transaction_rows({"status": {"$in": statuses}})
-    if body.refresh:
-        txns = [txn for txn in txns if txn["override_count"] == 0]
+    # Only the visible queue is evaluated, and only what needs it: pending items,
+    # plus (on refresh) awaiting-review items without a reviewer override.
+    queue = await _transaction_rows({"status": {"$in": OPEN_STATUSES}}, settings.queue_limit)
+    txns = [
+        txn for txn in queue
+        if txn["status"] == "pending" or txn["eval_id"] is None
+        or (body.refresh and txn["override_count"] == 0)
+    ]
 
     async def evaluate_one(txn: dict[str, Any]) -> dict[str, Any]:
         result = await evaluate(txn["txn_id"], refresh=body.refresh, principal=principal)
@@ -156,12 +176,21 @@ async def evaluate_pending(
             and txn["effective_recommendation"] != result["effective_recommendation"],
         }
 
-    results = await asyncio.gather(*(evaluate_one(txn) for txn in txns), return_exceptions=True)
+    # A few at a time: a burst of parallel model calls is what exhausts provider quota.
+    slots = asyncio.Semaphore(3)
+
+    async def limited(txn: dict[str, Any]) -> dict[str, Any]:
+        async with slots:
+            return await evaluate_one(txn)
+
+    results = await asyncio.gather(*(limited(txn) for txn in txns), return_exceptions=True)
     evaluated, failed = [], []
     for txn, result in zip(txns, results):
         if isinstance(result, Exception):
             if isinstance(result, ApiError):
                 message = result.message
+            elif type(result).__name__ == "ModelUnavailableError":
+                message = "The model is unavailable or over its quota. The transaction was left pending; retry shortly."
             elif isinstance(result, NotImplementedError):
                 message = f"Not built yet: {result}"
             else:

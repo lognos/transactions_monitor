@@ -21,11 +21,11 @@ import type {
 } from "./types";
 import { FixtureError, fixtures } from "./fixtures";
 
-// Bootstrap requests also need a known identity before principals are loaded.
-let principalId = "ana";
+// No default identity: nothing is sent as a reviewer until someone signs in.
+let principalId = "";
 
 export function setPrincipal(id: string | null) {
-  principalId = id || "ana";
+  principalId = id ?? "";
 }
 
 type ApiSource = "fixture" | "backend";

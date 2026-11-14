@@ -190,6 +190,7 @@ async def simulate_transactions(
     for row in selected:
         customer_doc, txn_doc = normalize_csv_row(row)
         txn_doc["status"] = "pending"
+        txn_doc["queued_at"] = utc_now_iso()  # top of the reviewer queue; created_at stays the source date
         if not txn_doc["txn_id"] or txn_doc["txn_id"] in existing_ids:
             txn_doc["txn_id"] = new_id("SIM")
         existing_ids.add(txn_doc["txn_id"])

@@ -1,0 +1,2 @@
+# Optional server instrumentation: uv pip install -r app/server/requirements-observability.txt
+logfire[fastapi,httpx]==4.41.0

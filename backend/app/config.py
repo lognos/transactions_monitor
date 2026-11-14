@@ -27,6 +27,8 @@ class Settings:
     llm_model: str = os.getenv("LLM_MODEL", "google_genai:gemini-2.5-flash")
     cors_origins: list[str] = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
     agent_id: str = "agent-01"
+    # How many open transactions a reviewer's queue shows (and the agent pre-evaluates).
+    queue_limit: int = int(os.getenv("QUEUE_LIMIT", "8"))
 
 
 settings = Settings()

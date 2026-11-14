@@ -107,7 +107,7 @@ export default function Home() {
 
   const simulateQueue = useMutation({
     mutationFn: (mode: "random" | "signals") =>
-      api.simulate({ count: mode === "signals" ? 2 : 3, mode, policy_only: true }),
+      api.simulate({ count: mode === "signals" ? 2 : 3, mode, policy_only: false }),
     onMutate: () => {
       setQueueError(null);
       verify.reset();
