@@ -1,7 +1,7 @@
 """CSV simulation engine for bringing consolidated transactions into the queue.
 
 Reads `data/AuditFlow_All_Transactions_Consolidated.csv`, normalizes rows via
-`app.agent.ingest.normalize_csv_row`, ensures matching policies exist in MongoDB,
+`app.agent.ingest.normalize_csv_row`, requires matching active policies in MongoDB,
 and processes each transaction through the policy/agent evaluation pipeline.
 """
 
@@ -13,11 +13,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal
 
-from app.agent.checks import CHECKS, DEFAULT_POLICIES
+from app.agent.checks import CHECKS
 from app.agent.graphs._deps import (
     agent_actor,
     make_insert,
-    make_update,
     new_id,
     utc_now_iso,
     write_with_audit,
@@ -62,18 +61,12 @@ async def _ensure_policy_in_db(txn_type: str) -> Dict[str, Any]:
     existing = await db.policies.find_one({"txn_type": txn_type, "active": True}, {"_id": 0})
     if existing:
         return existing
-    policy = DEFAULT_POLICIES.get(txn_type) or DEFAULT_POLICIES["wire"]
-    doc = {**policy, "txn_type": txn_type}
-    await db.policies.update_one(
-        {"txn_type": txn_type, "version": doc.get("version", 1)},
-        {"$setOnInsert": doc},
-        upsert=True,
-    )
-    return doc
+    raise ValueError(f"No active policy for transaction type '{txn_type}'")
 
 
 async def _evaluate_policy_only(
-    *, txn: Dict[str, Any], customer: Dict[str, Any], policy: Dict[str, Any], principal_id: str
+    *, txn: Dict[str, Any], customer: Dict[str, Any], policy: Dict[str, Any], principal_id: str,
+    insert_customer: bool,
 ) -> Dict[str, Any]:
     """Run deterministic policy checks and persist an evaluation via `write_with_audit`."""
     db = get_db()
@@ -99,6 +92,8 @@ async def _evaluate_policy_only(
                 "kind": "hard",
                 "source": "rule",
                 "result": outcome["result"],
+                "effective_result": outcome["result"],
+                "override": None,
                 "evidence": outcome["evidence"],
                 "explanation": outcome.get("explanation") or outcome["evidence"],
                 "facts": outcome.get("facts") or [],
@@ -125,6 +120,7 @@ async def _evaluate_policy_only(
         "policy_version": policy.get("version", 1),
         "checks": checks,
         "recommendation": recommendation,
+        "effective_recommendation": recommendation,
         "rationale": rationale,
         "precedents_used": [],
         "adjustments_used": [],
@@ -145,12 +141,9 @@ async def _evaluate_policy_only(
             "adjustments_used": [],
         },
         writes=[
+            *([make_insert("customers", customer)] if insert_customer else []),
+            make_insert("transactions", {**txn, "status": "awaiting_review"}),
             make_insert("evaluations", evaluation_doc),
-            make_update(
-                "transactions",
-                {"txn_id": txn["txn_id"]},
-                {"$set": {"status": "awaiting_review"}},
-            ),
         ],
     )
     return evaluation_doc
@@ -164,7 +157,7 @@ async def simulate_transactions(
     policy_only: bool = False,
 ) -> Dict[str, Any]:
     """Pull `count` rows from the consolidated CSV, ingest, and evaluate them."""
-    from app.agent.graphs.evaluate import evaluate_graph
+    from app.agent.graphs.evaluate import ModelUnavailableError, evaluate_graph
 
     rows = _load_csv_rows()
     pool = [r for r in rows if _is_signal_row(r)] if mode == "signals" else list(rows)
@@ -172,17 +165,10 @@ async def simulate_transactions(
         pool = list(rows)
 
     db = get_db()
-    existing_ids = set(
-        doc["txn_id"]
-        for doc in await db.transactions.find({}, {"_id": 0, "txn_id": 1}).to_list(length=None)
-    )
-    unused = [r for r in pool if (r.get("transaction_id") or "") not in existing_ids]
-    candidates = unused if len(unused) >= count else pool
-
     if mode == "sequential":
-        selected = candidates[:count]
+        selected = pool[:count]
     else:
-        selected = random.sample(candidates, k=min(count, len(candidates)))
+        selected = random.sample(pool, k=min(count, len(pool)))
 
     simulated: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
@@ -191,33 +177,31 @@ async def simulate_transactions(
         customer_doc, txn_doc = normalize_csv_row(row)
         txn_doc["status"] = "pending"
         txn_doc["queued_at"] = utc_now_iso()  # top of the reviewer queue; created_at stays the source date
-        if not txn_doc["txn_id"] or txn_doc["txn_id"] in existing_ids:
-            txn_doc["txn_id"] = new_id("SIM")
-        existing_ids.add(txn_doc["txn_id"])
+        txn_doc["source_txn_id"] = txn_doc["txn_id"]
+        txn_doc["txn_id"] = new_id("SIM")
+        created = False
 
         try:
             policy = await _ensure_policy_in_db(txn_doc["type"])
-            await db.customers.update_one(
-                {"customer_id": customer_doc["customer_id"]},
-                {"$setOnInsert": customer_doc},
-                upsert=True,
+            existing_customer = await db.customers.find_one(
+                {"customer_id": customer_doc["customer_id"]}, {"_id": 0},
             )
-            await db.transactions.insert_one(dict(txn_doc))
+            insert_customer = existing_customer is None
+            customer = existing_customer if existing_customer is not None else customer_doc
 
             if policy_only:
                 evaluation = await _evaluate_policy_only(
-                    txn=txn_doc, customer=customer_doc, policy=policy, principal_id=principal_id
+                    txn=txn_doc, customer=customer, policy=policy, principal_id=principal_id,
+                    insert_customer=insert_customer,
                 )
             else:
-                try:
-                    state = await evaluate_graph.ainvoke(
-                        {"txn_id": txn_doc["txn_id"], "principal_id": principal_id, "refresh": False}
-                    )
-                    evaluation = state["evaluation"]
-                except Exception:
-                    evaluation = await _evaluate_policy_only(
-                        txn=txn_doc, customer=customer_doc, policy=policy, principal_id=principal_id
-                    )
+                state = await evaluate_graph.ainvoke(
+                    {"txn_id": txn_doc["txn_id"], "principal_id": principal_id, "refresh": False,
+                     "simulation": True, "insert_customer": insert_customer,
+                     "txn": txn_doc, "customer": customer, "policy": policy}
+                )
+                evaluation = state["evaluation"]
+            created = True
 
             failed_checks = [
                 c["criterion_id"]
@@ -234,7 +218,16 @@ async def simulate_transactions(
                     "failed_checks": failed_checks,
                 }
             )
+        except ModelUnavailableError:
+            failed.append({
+                "txn_id": txn_doc["txn_id"], "code": "model_unavailable",
+                "created": False,
+                "error": "The model is unavailable or over its quota. No simulated transaction was created.",
+            })
+            # Do not consume more quota or ingest more transactions after a model outage.
+            break
         except Exception as exc:
-            failed.append({"txn_id": txn_doc["txn_id"], "error": f"{type(exc).__name__}: {exc}"})
+            failed.append({"txn_id": txn_doc["txn_id"], "created": created,
+                           "error": f"Simulation failed ({type(exc).__name__})."})
 
     return {"simulated": simulated, "failed": failed}

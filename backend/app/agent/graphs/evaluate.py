@@ -52,6 +52,18 @@ class ModelUnavailableError(RuntimeError):
     """The LLM could not be reached after retries; no evaluation was written."""
 
 
+def _is_quota_error(exc: Exception) -> bool:
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    return bool(names & {"RateLimitError", "ModelRateLimitError", "ResourceExhausted", "TooManyRequests"}) or any(
+        value == 429
+        for value in (
+            getattr(exc, "status_code", None),
+            getattr(exc, "code", None),
+            getattr(getattr(exc, "response", None), "status_code", None),
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Graph State (docs/contracts.md §7)
 # ---------------------------------------------------------------------------
@@ -63,6 +75,8 @@ class EvalState(TypedDict, total=False):
     txn_id: str
     principal_id: str
     refresh: bool
+    simulation: bool
+    insert_customer: bool
     txn: Dict[str, Any]
     customer: Dict[str, Any]
     policy: Dict[str, Any]
@@ -81,12 +95,19 @@ class EvalState(TypedDict, total=False):
 
 async def load(state: EvalState) -> Dict[str, Any]:
     """Load transaction, customer profile, and active policy from MongoDB."""
+    if state.get("simulation"):
+        # The simulator supplies a fresh transaction without writing it first.
+        # It becomes visible only with its successful, audited evaluation.
+        return {"txn": state["txn"], "customer": state["customer"], "policy": state["policy"]}
+
     db = get_db()
     txn_id = state["txn_id"]
 
     txn = await db["transactions"].find_one({"txn_id": txn_id}, {"_id": 0})
     if not txn:
         raise KeyError(f"Transaction not found: {txn_id}")
+    if txn.get("status") in {"passed", "rejected"}:
+        raise ValueError(f"Transaction '{txn_id}' already has a decision")
 
     customer = await db["customers"].find_one(
         {"customer_id": txn["customer_id"]}, {"_id": 0}
@@ -94,13 +115,15 @@ async def load(state: EvalState) -> Dict[str, Any]:
     if not customer:
         raise KeyError(f"Customer not found: {txn['customer_id']}")
 
-    existing = None
-    if state.get("refresh"):
-        existing = await db["evaluations"].find_one(
-            {"txn_id": txn_id, "status": "awaiting_review"}, {"_id": 0},
-            sort=[("created_at", -1), ("eval_id", -1)],
-        )
-        if existing and any(c.get("override") is not None for c in existing.get("checks", [])):
+    existing = await db["evaluations"].find_one(
+        {"txn_id": txn_id, "status": {"$ne": "superseded"}}, {"_id": 0},
+        sort=[("created_at", -1), ("eval_id", -1)],
+    )
+    if existing:
+        if existing.get("status") == "decided":
+            raise ValueError(f"Transaction '{txn_id}' already has a decision")
+        has_overrides = any(c.get("override") is not None for c in existing.get("checks", []))
+        if has_overrides or (txn.get("status") == "awaiting_review" and not state.get("refresh")):
             return {"txn": txn, "customer": customer, "evaluation": existing}
 
     policy = await db["policies"].find_one(
@@ -213,10 +236,8 @@ async def recommend(state: EvalState) -> Dict[str, Any]:
 
     structured_llm = get_structured_llm(RecommendOutput)
 
-    # Retry with backoff (rate limits are the usual cause). If the model still
-    # cannot be reached, fail the evaluation: the transaction stays pending and
-    # the caller reports the error. A provider outage must never be stored as
-    # the agent's "no_pass" judgment.
+    # Retry transient or invalid-output failures, but stop on provider quota
+    # errors. A provider outage must never be stored as a "no_pass" judgment.
     last_err: Exception | None = None
     for attempt, delay in enumerate((0, 3, 8)):
         if delay:
@@ -227,6 +248,8 @@ async def recommend(state: EvalState) -> Dict[str, Any]:
         except Exception as exc:
             last_err = exc
             logger.warning("recommend LLM attempt %d failed: %s", attempt + 1, type(exc).__name__)
+            if _is_quota_error(exc):
+                break
 
     raise ModelUnavailableError(
         f"The model could not evaluate the judgment criteria ({type(last_err).__name__})."
@@ -242,7 +265,6 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
     customer = state.get("customer") or {}
     policy = state["policy"]
     principal_id = state["principal_id"]
-    refresh = bool(state.get("refresh", False))
     hard_by_id = {c["criterion_id"]: c for c in state.get("checks", [])}
 
     amount = float(txn.get("amount") or 0)
@@ -377,7 +399,11 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
     writes = []
     previous = state.get("previous_evaluation")
     stale_filter: Dict[str, Any] = {"txn_id": txn["txn_id"], "status": "awaiting_review"}
-    if refresh and previous:
+    if state.get("simulation"):
+        if state.get("insert_customer"):
+            writes.append(make_insert("customers", customer))
+        writes.append(make_insert("transactions", {**txn, "status": "awaiting_review"}))
+    elif previous:
         writes.append(
             make_update(
                 "evaluations",
@@ -386,20 +412,22 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
             )
         )
         stale_filter["eval_id"] = {"$ne": previous["eval_id"]}
-    writes.append(
-        Write(
-            collection="evaluations", op="update_many",
-            filter=stale_filter, update={"$set": {"status": "superseded"}},
+    if not state.get("simulation"):
+        writes.append(
+            Write(
+                collection="evaluations", op="update_many",
+                filter=stale_filter, update={"$set": {"status": "superseded"}},
+            )
         )
-    )
-    writes.extend([
-        make_insert("evaluations", evaluation_doc),
-        make_update(
-            "transactions",
-            {"txn_id": txn["txn_id"]},
-            {"$set": {"status": "awaiting_review"}},
-        ),
-    ])
+    writes.append(make_insert("evaluations", evaluation_doc))
+    if not state.get("simulation"):
+        writes.append(
+            make_update(
+                "transactions",
+                {"txn_id": txn["txn_id"], "status": txn["status"]},
+                {"$set": {"status": "awaiting_review"}},
+            )
+        )
 
     await write_with_audit(
         actor=actor,
@@ -416,7 +444,7 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         writes=writes,
     )
 
-    return {"checks": merged_checks, "evaluation": evaluation_doc}
+    return {"checks": merged_checks, "evaluation": evaluation_doc, "txn": {**txn, "status": "awaiting_review"}}
 
 
 # ---------------------------------------------------------------------------

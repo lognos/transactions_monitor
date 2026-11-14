@@ -33,6 +33,12 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        if any(cls.__name__ == "ModelUnavailableError" for cls in type(exc).__mro__):
+            return JSONResponse(
+                {"error": {"code": "model_unavailable", "message":
+                    "The model is unavailable or over its quota. No evaluation was saved."}},
+                status_code=503,
+            )
         error_id = record_server_error(request, exc)
         rate_limited = any(cls.__name__ == "ModelRateLimitError" for cls in type(exc).__mro__)
         message = (
