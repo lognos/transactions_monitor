@@ -1,5 +1,7 @@
 """Process-local dependencies for running the cheque slice without Atlas."""
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
