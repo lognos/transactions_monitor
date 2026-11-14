@@ -1,78 +1,61 @@
-# Transactions Monitor: Auditable Payment Exception Resolution Agent
+# Transaction Validation Agent
 
-> Built for **Agents in Context Toronto: A MongoDB Hackathon**  
-> Problem Statement: **Problem 1 – Agents You Can Audit**
+> **Agents in Context Toronto: A MongoDB Hackathon** (Nov 14, 2026)  
+> **Track 1 — Agents You Can Audit:** *Build an agent using MongoDB Atlas as the identity, policy and audit layer, where every action is tied to an identity, checked against policy before it runs, and recorded so a reviewer can reconstruct it afterward.*
 
----
-
-## 📌 Overview
-
-Financial operations teams handle high volumes of payment exceptions (e.g., sanctioned accounts, mismatched routing numbers, suspicious velocity, or over-limit transfers). 
-
-**Transactions Monitor** is an autonomous AI operations agent that investigates and resolves payment exceptions. Rather than granting unconstrained execution permissions, **every single tool call is intercepted by a MongoDB Atlas governance layer** that enforces:
-
-1. **Identity & Delegation:** The agent acts explicitly on behalf of an authenticated human operator with defined roles and delegations (`Agent X` acts for `User Y`).
-2. **Pre-Execution Policy Gates:** Deterministic policies evaluated *before* execution (e.g., holds under \$10K permitted, releases over \$50K require secondary human approvers, no access to VIP PII).
-3. **Immutable, Tamper-Evident Audit:** An append-only ledger in MongoDB Atlas capturing intent, policy decisions, tool inputs/outputs, reasoning, and cryptographic hash chains.
-4. **Real-time Change Streams:** Real-time visibility into agent actions, flags, and approvals via MongoDB Atlas Change Streams.
+A LangGraph agent evaluates bank transactions against a regulatory checklist, recommends `pass` or `no_pass`, answers reviewer questions with policy/precedent citations, and learns from reviewer decisions. **MongoDB Atlas** (`txn_validation`) holds identities, versioned policies, the agent's memory (precedents & learned adjustments), and a hash-chained append-only audit log.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
-```mermaid
-flowchart TD
-    Operator([Operator / Identity]) -->|Delegates Task| Agent([Agent: LLM + Tools])
-    Agent -->|Every Tool Call| Gate[Policy Gate: Casbin + Atlas]
-    
-    subgraph GateChecks ["Policy Gate Checks"]
-        C1["1. Who? (identities collection)"]
-        C2["2. Allowed? (policies via casbin-pymongo-adapter)"]
-        C3["3. Log Decision (audit_events)"]
-    end
-    Gate --> GateChecks
-    
-    GateChecks -->|Allow| Exec[Run the Tool]
-    GateChecks -->|Deny / Needs Approval| Queue[Approvals Queue / Suspended]
-    
-    Exec --> Audit[(audit_events\nAppend-Only & Hash-Chained)]
-    Queue --> Audit
-    
-    Audit --> Stream[Atlas Change Streams]
-    Stream --> AuditorUI([Auditor UI: Timeline + Vector Search + Tamper Check])
-    AuditorUI -->|Supervisor Override / Approval| Gate
-```
-
-### Policy Engine Selection: Casbin + MongoDB Adapter
-To keep MongoDB Atlas at the core as the identity, policy, and audit layer:
-- **Engine:** [Casbin](https://casbin.org/) with native [`casbin-pymongo-adapter`](https://github.com/pycasbin/pymongo-adapter).
-- **Storage:** Policies reside directly in an Atlas collection (`policies`), allowing instant rule updates without deploying code or maintaining separate policy servers.
-- **Enforcement:** Supports RBAC and ABAC rules (roles, resource permissions, amount limits, and dual-approver thresholds) evaluated pre-execution.
+1. **Evaluate Graph (`backend/app/agent/graphs/evaluate.py`):** Loads transaction & customer profile, runs deterministic Python `hard` checks from `policies`, retrieves precedents & active adjustments via Atlas Vector Search (`memory`), and uses an LLM to evaluate `judgment` criteria and produce a rationale.
+2. **Review Graph (`backend/app/agent/graphs/review.py`):** Handles reviewer Q&A (`AnswerQuestion`) and decisions (`PolicyGate` → `RecordDecision` → `LearnFromFeedback` / `StorePrecedent`).
+3. **Deterministic Policy Gate (`backend/app/db/gate.py`):** Checks reviewer role, amount limits, and hard-fail overrides *before* any decision is recorded. Denials are audited.
+4. **Tamper-Evident Audit Log (`backend/app/db/audit.py`):** Every write after seeding goes through `write_with_audit` in a multi-document transaction serialized via `chain_head`, computing `sha256(prev_hash + canonical_json(event))`.
 
 ---
 
-## 🚀 Getting Started
+## Quick Start
 
-### 1. Prerequisites
-- Python 3.10+ or Node.js (depending on service stack)
-- MongoDB Atlas cluster (M0 or higher) with Change Streams enabled
+### 1. Environment
+Copy `.env.example` to `.env` and set `MONGODB_CONNECTION_STRING` (or `MONGODB_URI`), `DB_NAME=txn_validation`, `GOOGLE_API_KEY`, and optionally `LANGSMITH_*` variables.
 
-### 2. Environment Setup
-Copy the example environment configuration:
+### 2. Backend (`backend/`)
 ```bash
-cp .env.example .env
+cd backend
+uv sync
+uv run python -m scripts.ping_db
+uv run python -m scripts.setup_db
+uv run python -m scripts.seed
+uv run uvicorn app.server.main:app --reload --port 8010
 ```
-Fill in your `MONGODB_URI` and LLM API keys in `.env`.
+
+### 3. Frontend (`frontend/`)
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:3000 (proxies /api -> localhost:8010)
+```
 
 ---
 
-## 📁 Repository Structure
-```
-.
-├── .env.example                     # Environment variables template
-├── .gitignore                       # Git ignore rules for secrets and build artifacts
-├── README.md                        # Project documentation
-├── implementation_plan.md           # 4-hour build plan, scenarios, acceptance tests & demo script
-├── hackathon.md                     # Hackathon rules & reference guide
-└── payment_exception_audit_agent.md # Detailed system spec & Atlas schema design
-```
+## Documentation Map
+
+| File | Purpose |
+| --- | --- |
+| [`AGENTS.md`](AGENTS.md) | Repo rules, invariants, lane ownership, and commands |
+| [`docs/contracts.md`](docs/contracts.md) | **Source of truth** for collections, enums, HTTP API, Python interfaces, and LLM schemas |
+| [`transaction-validation-design.md`](transaction-validation-design.md) | Workflow overview, auditable learning guardrails, checklists, and Canadian regulatory context |
+| [`docs/plan-db.md`](docs/plan-db.md) | DB lane scope (`app/db/`, `setup_db.py`) |
+| [`docs/plan-agent.md`](docs/plan-agent.md) | Agent lane scope (`app/agent/` LangGraph graphs, checks, memory, prompts) |
+| [`docs/plan-ui.md`](docs/plan-ui.md) | UI & server lane scope (`frontend/`, `app/server/`) |
+| [`docs/plan-scenarios.md`](docs/plan-scenarios.md) | Demo scenarios, seed data spec, and 3-minute pitch outline |
+| [`docs/fintrac_policy_update_checker.md`](docs/fintrac_policy_update_checker.md) | FINTRAC policy update checker & vector DB ingestion loop (`scripts/`) |
+
+---
+
+## Hackathon Constraints
+- **Track:** Problem 1 — *Agents You Can Audit* (all code & seed data written during the event; public repo; MongoDB Atlas Sandbox).
+- **No Streamlit / no passive dashboards:** Built with FastAPI + Next.js 16 (App Router) + Tailwind CSS 4.
+- **Submissions due:** 5:00 PM EST (with 1-minute demo video). Judging: 3-min live demo + Q&A (Technical Demo 35%, Implementation Difficulty 30%, Impact 20%, Creativity 15%).
