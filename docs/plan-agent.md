@@ -2,7 +2,7 @@
 
 Owner: buddybud24. Shapes and names come from [contracts.md](contracts.md).
 
-> **Proposed, not agreed yet:** decisions become Approve / Reject, and reviewers can override individual checks. See [contracts.md §8](contracts.md#8-check-overrides-and-decisions). Until the team confirms, this plan stands as written.
+> **Agreed update:** decisions are Approve / Reject, and reviewers can override individual checks. Read [contracts.md §8](contracts.md#8-check-overrides-and-decisions) first; where this plan says "validate" or "hard checks cannot be overridden", §8 wins.
 
 ## Goal
 

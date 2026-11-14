@@ -5,6 +5,7 @@ import type {
   AskResponse,
   AuditEvent,
   ChatResponse,
+  CheckResult,
   DecideResponse,
   Evaluation,
   EvaluatePendingResponse,
@@ -32,7 +33,7 @@ type ApiSource = "fixture" | "backend";
 const defaultSource: ApiSource = process.env.NEXT_PUBLIC_API_SOURCE === "backend" ? "backend" : "fixture";
 export const apiSources: Record<
   "health" | "principals" | "transactions" | "evaluate" | "evaluation" | "ask" |
-  "decide" | "audit" | "verifyChain" | "evaluatePending" | "references" | "chat",
+  "decide" | "audit" | "verifyChain" | "evaluatePending" | "references" | "chat" | "overrideCheck",
   ApiSource
 > = {
   health: defaultSource,
@@ -47,6 +48,7 @@ export const apiSources: Record<
   evaluatePending: defaultSource,
   references: defaultSource,
   chat: defaultSource,
+  overrideCheck: defaultSource,
 };
 
 export function getApiMode(): "fixtures" | "backend" | "mixed" {
@@ -58,18 +60,21 @@ export function getApiMode(): "fixtures" | "backend" | "mixed" {
 interface ErrorBody {
   error?: { code?: string; message?: string };
   gate?: Gate;
+  blocking_checks?: string[];
 }
 
 export class ApiError extends Error {
   status: number;
   code?: string;
   gate?: Gate;
+  blocking_checks?: string[];
 
   constructor(status: number, body: ErrorBody | null) {
     super(body?.error?.message ?? `Request failed (${status})`);
     this.status = status;
     this.code = body?.error?.code;
     this.gate = body?.gate;
+    this.blocking_checks = body?.blocking_checks;
   }
 }
 
@@ -112,6 +117,9 @@ export const api = {
     request<Evaluation>("GET", `/evaluations/${pathId(evalId)}`)),
   references: (evalId: string, criterionId: string) => call("references", () => fixtures.references(evalId, criterionId), () =>
     request<ReferencesResponse>("GET", `/evaluations/${pathId(evalId)}/checks/${pathId(criterionId)}/references`)),
+  overrideCheck: (evalId: string, criterionId: string, result: CheckResult | null, reason?: string) =>
+    call("overrideCheck", () => fixtures.overrideCheck(evalId, criterionId, principalId, result, reason), () =>
+      request<Evaluation>("POST", `/evaluations/${pathId(evalId)}/checks/${pathId(criterionId)}/override`, { result, reason })),
   ask: (evalId: string, question: string) =>
     call("ask", () => fixtures.ask(evalId, principalId, question), () => request<AskResponse>("POST", `/evaluations/${pathId(evalId)}/ask`, { question })),
   chat: (message: string) => call("chat", () => fixtures.chat(principalId, message), () => request<ChatResponse>("POST", "/chat", { message })),

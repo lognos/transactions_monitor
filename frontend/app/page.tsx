@@ -10,7 +10,7 @@ import { MicrosoftLogo, TsxMark } from "@/components/tsx-mark";
 import { Badge, Button } from "@/components/ui";
 import { api, getApiMode, setPrincipal } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import type { Evaluation, MemoryItem, Recommendation, TransactionSummary, Verdict } from "@/lib/types";
+import type { AskResponse, ChatResponse, CheckResult, Evaluation, MemoryItem, Recommendation, ReferencesResponse, TransactionSummary, Verdict } from "@/lib/types";
 
 const statusLabels = { pending: "Pending", awaiting_review: "Awaiting review", passed: "Passed", rejected: "Rejected" };
 const recommendationLabel = (value: Recommendation) => value === "pass" ? "PASS" : "NO-PASS";
@@ -62,14 +62,14 @@ export default function Home() {
   const transactions = queue.data?.transactions ?? [];
   const focusedTxn = transactions.find((txn) => txn.txn_id === focusedTxnId);
   const evalId = focusedTxn?.eval_id;
-  const evaluation = useQuery({ queryKey: ["evaluation", evalId], queryFn: () => api.evaluation(evalId!), enabled: Boolean(evalId) });
+  const evaluation = useQuery({ queryKey: ["evaluation", evalId], queryFn: () => api.evaluation(evalId!), enabled: Boolean(evalId && principalId) });
   const references = useQuery({
     queryKey: ["references", reference?.evalId, reference?.criterionId],
-    queryFn: () => api.references(reference!.evalId, reference!.criterionId), enabled: Boolean(reference),
+    queryFn: () => api.references(reference!.evalId, reference!.criterionId), enabled: Boolean(reference && principalId),
   });
   const audit = useQuery({
     queryKey: ["audit", focusedTxnId], queryFn: () => api.audit(focusedTxnId ?? undefined),
-    enabled: tab === "audit" && Boolean(principals.data),
+    enabled: tab === "audit" && Boolean(principals.data && principalId),
   });
   const verify = useMutation({ mutationFn: api.verifyChain });
 
@@ -80,7 +80,7 @@ export default function Home() {
       setQueueError(null);
       verify.reset();
       const before = client.getQueryData<QueueData>(["transactions"])?.transactions ?? [];
-      setLoadingRows(before.filter((txn) => txn.status === "pending" || (refresh && txn.status === "awaiting_review")).map((txn) => txn.txn_id));
+      setLoadingRows(before.filter((txn) => txn.status === "pending" || (refresh && txn.status === "awaiting_review" && txn.override_count === 0)).map((txn) => txn.txn_id));
       return { before };
     },
     onSuccess: async (result, _refresh, context) => {
@@ -88,7 +88,7 @@ export default function Home() {
         const next = { ...previous };
         for (const item of result.evaluated) {
           if (item.changed) next[item.txn_id] = {
-            before: context?.before.find((txn) => txn.txn_id === item.txn_id)?.recommendation ?? null,
+            before: context?.before.find((txn) => txn.txn_id === item.txn_id)?.effective_recommendation ?? null,
             after: item.recommendation,
           };
         }
@@ -108,14 +108,60 @@ export default function Home() {
   const evaluate = evaluateQueue.mutate;
   useEffect(() => {
     const pending = queue.data?.transactions.filter((txn) => txn.status === "pending" && !autoAttempted.current.has(txn.txn_id)) ?? [];
-    if (!pending.length || queueRunning.current) return;
+    if (!principalId || !pending.length || queueRunning.current) return;
     pending.forEach((txn) => autoAttempted.current.add(txn.txn_id));
     queueRunning.current = true;
     evaluate(false);
-  }, [queue.data, evaluate]);
+  }, [queue.data, evaluate, principalId]);
+
+  function applyUpdatedEvaluation(updated: Evaluation) {
+    client.setQueryData<Evaluation>(["evaluation", updated.eval_id], updated);
+    client.setQueryData<QueueData>(["transactions"], (old) => old ? {
+      transactions: old.transactions.map((txn) => txn.txn_id === updated.txn_id ? {
+        ...txn,
+        eval_id: updated.eval_id,
+        status: updated.transaction.status,
+        recommendation: updated.recommendation,
+        effective_recommendation: updated.effective_recommendation,
+        failed_checks: updated.checks.filter((check) => check.effective_result === "no_pass").map((check) => check.criterion_id),
+        override_count: updated.checks.filter((check) => check.override !== null).length,
+      } : txn),
+    } : old);
+    client.setQueriesData<ReferencesResponse>({ queryKey: ["references", updated.eval_id] }, (old) => {
+      if (!old) return old;
+      const check = updated.checks.find((item) => item.criterion_id === old.check.criterion_id);
+      return check ? { ...old, check: { ...old.check, result: check.result, effective_result: check.effective_result, override: check.override } } : old;
+    });
+    setChangedRows((previous) => {
+      const next = { ...previous };
+      delete next[updated.txn_id];
+      return next;
+    });
+    verify.reset();
+    void client.invalidateQueries({ queryKey: ["references", updated.eval_id] });
+    void client.invalidateQueries({ queryKey: ["audit"] });
+  }
+
+  const override = useMutation({
+    mutationFn: ({ evaluationId, criterionId, result, reason }: { evaluationId: string; criterionId: string; result: CheckResult | null; reason?: string }) => api.overrideCheck(evaluationId, criterionId, result, reason),
+    onMutate: async ({ evaluationId }) => {
+      await Promise.all([
+        client.cancelQueries({ queryKey: ["evaluation", evaluationId] }),
+        client.cancelQueries({ queryKey: ["transactions"] }),
+      ]);
+    },
+    onSuccess: applyUpdatedEvaluation,
+    onError: () => { verify.reset(); void client.invalidateQueries({ queryKey: ["audit"] }); },
+  });
 
   const decision = useMutation({
     mutationFn: ({ evaluationId, verdict, comments }: { evaluationId: string; verdict: Verdict; comments?: string }) => api.decide(evaluationId, verdict, comments),
+    onMutate: async ({ evaluationId }) => {
+      await Promise.all([
+        client.cancelQueries({ queryKey: ["evaluation", evaluationId] }),
+        client.cancelQueries({ queryKey: ["transactions"] }),
+      ]);
+    },
     onSuccess: async (result, variables) => {
       verify.reset();
       client.setQueryData<Evaluation>(["evaluation", variables.evaluationId], (old) => old ? {
@@ -126,7 +172,7 @@ export default function Home() {
         transactions: old.transactions.map((txn) => txn.txn_id === result.decision.txn_id ? { ...txn, status: result.transaction_status } : txn),
       } : old);
       const learned = result.memory_created.filter((item) => item.kind === "adjustment");
-      if (learned.length) {
+      if (result.decision.verdict === "approved" && learned.length) {
         setAdjustments(learned);
         setChangedRows({});
         setChecksOpen(false);
@@ -143,9 +189,18 @@ export default function Home() {
   });
 
   const chat = useMutation({
-    mutationFn: ({ text, evaluationId }: { text: string; evaluationId?: string; txnId?: string }) => evaluationId ? api.ask(evaluationId, text) : api.chat(text),
-    onSuccess: (answer, request) => {
-      setMessages((previous) => [...previous, { id: crypto.randomUUID(), role: "agent", text: answer.answer, citations: answer.citations, txnId: request.txnId, evaluationId: request.evaluationId }]);
+    mutationFn: async ({ text, evaluationId }: { text: string; evaluationId?: string; txnId?: string }): Promise<AskResponse | ChatResponse> => evaluationId ? api.ask(evaluationId, text) : api.chat(text),
+    onSuccess: async (answer, request) => {
+      const report = "override" in answer ? answer.override : null;
+      if (report?.status === "applied" && "evaluation" in answer && answer.evaluation) {
+        await Promise.all([
+          client.cancelQueries({ queryKey: ["evaluation", answer.evaluation.eval_id] }),
+          client.cancelQueries({ queryKey: ["transactions"] }),
+        ]);
+        applyUpdatedEvaluation(answer.evaluation);
+        decision.reset();
+      }
+      setMessages((previous) => [...previous, { id: crypto.randomUUID(), role: "agent", text: answer.answer, citations: answer.citations, txnId: request.txnId, evaluationId: request.evaluationId, override: report }]);
       verify.reset();
       void client.invalidateQueries({ queryKey: ["audit"] });
     },
@@ -155,6 +210,7 @@ export default function Home() {
     setPrincipal(id);
     setPrincipalId(id);
     decision.reset();
+    override.reset();
   }
   function logOut() {
     setPrincipal(null);
@@ -162,6 +218,7 @@ export default function Home() {
     setChecksOpen(false);
     setReference(null);
     decision.reset();
+    override.reset();
   }
   function openTransaction(txn: TransactionSummary) {
     setFocusedTxnId(txn.txn_id);
@@ -172,7 +229,7 @@ export default function Home() {
     if (evalId && evaluation.data?.checks.some((check) => check.criterion_id === criterionId)) setReference({ evalId, criterionId });
   }
   function sendMessage(text: string) {
-    if (chat.isPending || (focusedTxnId && !evalId)) return;
+    if (chat.isPending || override.isPending || decision.isPending || evaluateQueue.isPending || (focusedTxnId && !evalId)) return;
     setMessages((previous) => [...previous, {
       id: crypto.randomUUID(), role: "user", text, txnId: focusedTxnId ?? undefined,
       author: me?.name ?? principalId ?? "",
@@ -184,7 +241,7 @@ export default function Home() {
   const mode = getApiMode();
   const error = principals.error ?? queue.error;
   const changedEntries = Object.entries(changedRows);
-  const busy = evaluateQueue.isPending || decision.isPending;
+  const busy = evaluateQueue.isPending || decision.isPending || override.isPending || chat.isPending;
   const detailsOpen = checksOpen && Boolean(focusedTxnId);
 
   return (
@@ -208,7 +265,7 @@ export default function Home() {
                 <p className="text-xs text-text-muted capitalize">{me.role}{me.approval_limit != null ? ` · limit CAD ${me.approval_limit.toLocaleString("en-CA")}` : ""}</p>
               </div>
             </div>
-            <Button variant="ghost" aria-label="Log out" title="Log out" className="w-full justify-start px-2.5 whitespace-nowrap" disabled={decision.isPending} onClick={logOut}>
+            <Button variant="ghost" aria-label="Log out" title="Log out" className="w-full justify-start px-2.5 whitespace-nowrap" disabled={busy} onClick={logOut}>
               <LogOut className="size-4 shrink-0" aria-hidden="true" /><span className={reveal}>Log out</span>
             </Button>
           </> : <p className={cn("text-xs text-text-muted", reveal)}>Not logged in.</p>}
@@ -241,7 +298,7 @@ export default function Home() {
       <main ref={splitPane} style={{ "--chat-width": `${chatWidth}%` } as CSSProperties}
         className={cn("grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(300px,var(--chat-width))_10px_minmax(420px,1fr)]", resizing && "cursor-col-resize select-none")}>
         <ChatPanel messages={messages} focus={focusedTxnId ? { txnId: focusedTxnId, evaluationId: evalId ?? undefined, criterionIds: evaluation.data?.checks.map((check) => check.criterion_id) ?? [] } : null}
-          busy={chat.isPending} disabled={!principals.data || Boolean(focusedTxnId && (!evalId || loadingRows.includes(focusedTxnId)))} error={chat.error?.message}
+          busy={chat.isPending} disabled={!principals.data || override.isPending || decision.isPending || evaluateQueue.isPending || Boolean(focusedTxnId && (!evalId || loadingRows.includes(focusedTxnId)))} error={chat.error?.message}
           onClearFocus={() => { setFocusedTxnId(null); if (!chat.isPending) chat.reset(); }} onSend={sendMessage} onCitation={openReferences} />
         <div role="separator" aria-label="Resize chat and artifacts panes" aria-orientation="vertical" aria-controls="chat-pane artifacts-pane"
           aria-valuenow={Math.round(chatWidth)} aria-valuemin={0} aria-valuemax={100} aria-valuetext={`Chat width ${Math.round(chatWidth)} percent`}
@@ -309,18 +366,20 @@ export default function Home() {
                 const loading = loadingRows.includes(txn.txn_id);
                 const changed = changedRows[txn.txn_id];
                 return <li key={txn.txn_id}>
-                  <button type="button" disabled={loading || decision.isPending} onClick={() => openTransaction(txn)} aria-busy={loading}
+                  <button type="button" disabled={loading || decision.isPending || override.isPending} onClick={() => openTransaction(txn)} aria-busy={loading}
                     aria-expanded={detailsOpen && focusedTxnId === txn.txn_id}
                     className={cn("grid w-full grid-cols-[5.25rem_3.25rem_minmax(0,1fr)_auto_10.5rem] items-center gap-3 rounded-md border px-3 py-1.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-border-focus disabled:cursor-wait",
-                      changed ? "border-2 border-status-positive-border bg-status-positive-bg" : focusedTxnId === txn.txn_id ? "border-accent bg-accent-subtle" : "border-border-subtle bg-surface-1 hover:bg-surface-2")}>
+                      changed ? "border-2 border-status-positive-border bg-status-positive-bg" : txn.override_count > 0 ? "border-status-info-border bg-status-info-bg" : focusedTxnId === txn.txn_id ? "border-accent bg-accent-subtle" : "border-border-subtle bg-surface-1 hover:bg-surface-2")}>
                     <span className="font-mono text-xs font-medium">{txn.txn_id}</span>
                     <span className="text-xs text-text-muted capitalize">{txn.type}</span>
                     <span className="truncate">{txn.customer_name}<span className="ml-2 text-xs text-text-subtle">{statusLabels[txn.status]}</span></span>
                     <span className="font-medium">{txn.currency} {txn.amount.toLocaleString("en-CA")}</span>
-                    <span className="flex items-center justify-end gap-2">
-                      {loading ? <span role="status" className="flex items-center gap-1.5 text-xs text-accent-fg"><LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />Evaluating…</span> : txn.recommendation ? <>
-                        <span className="text-xs text-text-muted">{changed ? "changed · " : ""}{txn.failed_checks.length} failed</span>
-                        <Badge tone={txn.recommendation === "pass" ? "positive" : "negative"}>{recommendationLabel(txn.recommendation)}</Badge>
+                    <span className="flex flex-col items-end gap-1">
+                      {loading ? <span role="status" className="flex items-center gap-1.5 text-xs text-accent-fg"><LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />Evaluating…</span> : txn.effective_recommendation ? <>
+                        <span className="flex items-center gap-2"><span className="text-xs text-text-muted">{changed ? "changed · " : ""}{txn.failed_checks.length} failed</span>
+                          <Badge tone={txn.effective_recommendation === "pass" ? "positive" : "negative"}>{recommendationLabel(txn.effective_recommendation)}</Badge></span>
+                        {txn.recommendation && txn.effective_recommendation !== txn.recommendation && <span className="text-xs text-text-muted">Agent: <s>{recommendationLabel(txn.recommendation)}</s></span>}
+                        {txn.override_count > 0 && <Badge tone="info" size="sm">{txn.override_count} {txn.override_count === 1 ? "override" : "overrides"}</Badge>}
                       </> : <Badge>Not evaluated</Badge>}
                     </span>
                   </button>
@@ -330,7 +389,12 @@ export default function Home() {
            </div>
            {detailsOpen && <TransactionDetails evaluation={evaluation.data} loading={Boolean(evalId) && evaluation.isPending}
              error={evaluation.error?.message ?? (!evalId ? "This transaction has no evaluation yet. Use Evaluate queue to retry." : null)}
-             busy={decision.isPending} decisionError={decision.error?.message} principals={people}
+             busy={decision.isPending} overrideBusy={override.isPending || chat.isPending || evaluateQueue.isPending} decisionError={decision.error?.message} principals={people}
+             onOverride={async (criterionId, result, reason) => {
+               if (!evalId) return;
+               decision.reset();
+               await override.mutateAsync({ evaluationId: evalId, criterionId, result, reason });
+             }}
              onClose={() => setChecksOpen(false)} onReferences={openReferences} onDecide={(verdict, comments) => { if (evalId) decision.mutate({ evaluationId: evalId, verdict, comments }); }} />}
           </div> : <div id="audit-panel" role="tabpanel" aria-labelledby="audit-tab" className="min-h-0 flex-1 overflow-y-auto p-5">
             <AuditPanel events={audit.data?.events ?? []} loading={audit.isLoading} error={audit.error?.message ?? verify.error?.message} focusTxnId={focusedTxnId}
@@ -339,7 +403,7 @@ export default function Home() {
         </section>
       </main>}
       </div>
-      <ReferencesDialog open={Boolean(reference)} references={references.data} loading={references.isPending} error={references.error?.message} onClose={() => setReference(null)} />
+      <ReferencesDialog open={Boolean(reference)} references={references.data} loading={references.isPending} error={references.error?.message} principals={people} onClose={() => setReference(null)} />
     </div>
   );
 }

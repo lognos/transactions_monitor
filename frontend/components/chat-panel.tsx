@@ -4,7 +4,7 @@ import { ArrowUp, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Badge, Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import type { Citation } from "@/lib/types";
+import type { Citation, OverrideReport } from "@/lib/types";
 
 export interface ChatMessage {
   id: string;
@@ -14,6 +14,7 @@ export interface ChatMessage {
   txnId?: string;
   evaluationId?: string;
   author?: string;
+  override?: OverrideReport | null;
 }
 
 export interface ChatPanelProps {
@@ -64,6 +65,18 @@ export function ChatPanel({
               ? "ml-auto w-fit max-w-[calc(100%-1.5rem)] rounded-2xl border border-border-subtle bg-surface-2 px-4 py-3"
               : "py-2")}>
             {message.txnId && <p className="font-mono text-xs text-text-subtle">{message.txnId}</p>}
+            {message.role === "agent" && message.override && (
+              <p className={cn("flex flex-wrap items-center gap-x-2 gap-y-1 border-l-2 py-1 pl-3 text-base font-medium",
+                message.override.status === "applied" ? "border-status-info-border text-status-info-fg"
+                  : message.override.status === "denied" ? "border-status-negative-border text-status-negative-fg"
+                    : "border-status-attention-border text-status-attention-fg")}>
+                <span>{message.override.status === "applied" ? "Override applied" : message.override.status === "denied" ? "Override denied" : "Override needs a reason"}</span>
+                <span className="font-mono">{message.override.criterion_id}</span>
+                <span>{message.override.status === "applied"
+                  ? `${message.override.from.replaceAll("_", "-").toUpperCase()} → ${message.override.to.replaceAll("_", "-").toUpperCase()}`
+                  : "No check changed"}</span>
+              </p>
+            )}
             <p className="whitespace-pre-wrap break-words text-base leading-relaxed">{message.text}</p>
             {!!message.citations?.length && (
               <div className="flex flex-wrap gap-2" aria-label="Answer citations">

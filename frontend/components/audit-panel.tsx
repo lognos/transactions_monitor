@@ -15,6 +15,17 @@ export interface AuditPanelProps {
   principals: Principal[];
 }
 
+function eventLabel(event: AuditEvent): string {
+  if (event.event === "check.overridden") return "Check overridden";
+  if (event.event === "check.override_reverted") return "Check override reverted";
+  if (event.event === "decision.denied" && event.detail.action === "override") return "Override denied";
+  return event.event;
+}
+
+function resultLabel(value: unknown): string | null {
+  return typeof value === "string" ? value.replaceAll("_", "-").toUpperCase() : null;
+}
+
 function detailText(event: AuditEvent): string {
   const detail = event.detail;
   const gate = detail.gate && typeof detail.gate === "object" ? detail.gate as Record<string, unknown> : null;
@@ -26,10 +37,18 @@ function detailText(event: AuditEvent): string {
     }
     case "question.answered":
       return typeof detail.question === "string" ? detail.question : "Answered a reviewer question";
+    case "check.overridden":
+    case "check.override_reverted":
+      return [
+        typeof detail.criterion_id === "string" ? detail.criterion_id : null,
+        typeof detail.from === "string" && typeof detail.to === "string" ? `${resultLabel(detail.from)} → ${resultLabel(detail.to)}` : null,
+        typeof detail.reason === "string" ? `Reason: ${detail.reason}` : null,
+        typeof detail.via === "string" ? `Via ${detail.via}` : null,
+      ].filter(Boolean).join(" · ");
     case "decision.denied":
-      return ["Decision denied", typeof gate?.reason === "string" ? gate.reason : null, typeof detail.amount === "number" ? `CAD ${detail.amount.toLocaleString()}` : null].filter(Boolean).join(" · ");
+      return [detail.action === "override" ? "Override denied" : "Decision denied", typeof detail.criterion_id === "string" ? detail.criterion_id : null, typeof gate?.reason === "string" ? gate.reason : null, typeof detail.amount === "number" ? `CAD ${detail.amount.toLocaleString()}` : null].filter(Boolean).join(" · ");
     case "decision.recorded":
-      return [String(detail.verdict || "Decision recorded").replaceAll("_", " "), typeof detail.agreed_with_agent === "boolean" ? detail.agreed_with_agent ? "Agreed with agent" : "Reviewer overrode recommendation" : null, typeof gate?.rule_id === "string" ? `Gate ${gate.rule_id}` : null].filter(Boolean).join(" · ");
+      return [String(detail.verdict || "Decision recorded").replaceAll("_", " "), typeof detail.effective_recommendation === "string" ? `Effective recommendation: ${resultLabel(detail.effective_recommendation)}` : null, Array.isArray(detail.overrides) && detail.overrides.length ? `Overrides: ${detail.overrides.join(", ")}` : null, typeof detail.agreed_with_agent === "boolean" ? detail.agreed_with_agent ? "Agreed with agent" : "Reviewer overrode recommendation" : null, typeof gate?.rule_id === "string" ? `Gate ${gate.rule_id}` : null].filter(Boolean).join(" · ");
     case "memory.created":
       return [detail.kind === "adjustment" ? "Learned adjustment" : "Previous decision saved as precedent", typeof detail.criterion_id === "string" ? detail.criterion_id : null, typeof detail.author_id === "string" ? `Author: ${detail.author_id}` : null].filter(Boolean).join(" · ");
     default:
@@ -70,7 +89,7 @@ export function AuditPanel({ events, loading, error, focusTxnId, verification, v
             <li key={event.seq} className="relative rounded-lg border border-border-subtle bg-surface-1 p-4">
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <span className="font-mono text-sm text-text-subtle">#{event.seq}</span>
-                <Badge tone={event.event === "decision.denied" ? "negative" : event.event === "memory.created" ? "info" : "neutral"} className="text-sm">{event.event}</Badge>
+                <Badge tone={event.event === "decision.denied" ? "negative" : event.event === "memory.created" || event.event === "check.overridden" ? "info" : "neutral"} className="text-sm" title={event.event}>{eventLabel(event)}</Badge>
                 {event.txn_id && <span className="font-mono text-sm text-text-muted">{event.txn_id}</span>}
                 <time dateTime={event.ts} className="ml-auto text-xs text-text-subtle">{new Date(event.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
               </div>

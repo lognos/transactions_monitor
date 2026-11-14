@@ -1,15 +1,15 @@
 // In-memory demo responses built from contracts §4 and plan-scenarios.md.
 // Reloading the page restores a fresh queue. These functions never contact Atlas.
 import type {
-  AskResponse, AuditEvent, ChatResponse, Check, DecideResponse, Evaluation,
-  EvaluatePendingResponse, Gate, MemoryItem, Principal, ReferencesResponse,
+  AskResponse, AuditEvent, ChatResponse, Check, CheckOverride, CheckResult, DecideResponse, Decision, Evaluation,
+  EvaluatePendingResponse, Gate, MemoryItem, OverrideReport, Principal, ReferencesResponse,
   Transaction, TransactionSummary, TxnStatus, Verdict, VerifyResponse,
 } from "./types";
 
 export class FixtureError extends Error {
   constructor(
     public status: number,
-    public body: { error: { code: string; message: string }; gate?: Gate },
+    public body: { error: { code: string; message: string }; gate?: Gate; blocking_checks?: string[] },
   ) {
     super(body.error.message);
   }
@@ -52,6 +52,7 @@ function freshTransactions(): Transaction[] {
 type StoredMemory = MemoryItem & {
   author_id: string; author_name: string | null; source_txn_id: string | null;
   verdict: Verdict | null; created_at: string; condition?: string;
+  scope?: { criterion_id: string; condition: string };
 };
 
 const seededMemories: StoredMemory[] = [
@@ -110,11 +111,58 @@ function audit(data: Pick<AuditEvent, "actor" | "event" | "txn_id" | "ref" | "de
   return work;
 }
 
+function assertReviewable(evaluation: Evaluation): void {
+  if (evaluation.status !== "awaiting_review") {
+    fail(409, "already_decided", "This evaluation is already decided or has been superseded. Refresh the transaction.");
+  }
+}
+
+async function reviewerGate(evaluation: Evaluation, principalId: string, action: "decision" | "override", criterionId: string | null, verdict?: Verdict): Promise<Gate> {
+  const person = principal(principalId);
+  const rule_id = person.role === "analyst" ? "D-01" : person.role === "supervisor" ? "D-02" : null;
+  const amount = evaluation.transaction.amount;
+  const denial = !rule_id ? { message: "This role has no permission to decide transactions or override checks.", reason: "no decision rule" }
+    : person.approval_limit != null && amount > person.approval_limit
+      ? { message: `Amount ${amount} exceeds analyst limit ${person.approval_limit}. A supervisor must decide or override this check.`, reason: "amount over limit" } : null;
+  if (denial) {
+    const gate: Gate = { result: "deny", rule_id, reason: denial.reason };
+    await audit({ actor: actor(principalId), event: "decision.denied", txn_id: evaluation.txn_id,
+      ref: { collection: "evaluations", id: evaluation.eval_id }, detail: { action, criterion_id: criterionId, amount, gate, ...(verdict ? { verdict } : {}) } });
+    throw new FixtureError(403, { error: { code: "gate_denied", message: denial.message }, gate });
+  }
+  return { result: "allow", rule_id, reason: person.role === "analyst" ? "analyst within limit" : "supervisor authorized" };
+}
+
+// Panel and chat both use this path. Original results and evidence stay untouched.
+async function overrideCheck(evalId: string, criterionId: string, principalId: string, result: CheckResult | null, reason: string | undefined, via: CheckOverride["via"]): Promise<Evaluation> {
+  const evaluation = findEvaluation(evalId);
+  assertReviewable(evaluation);
+  const check = evaluation.checks.find((item) => item.criterion_id === criterionId) ?? fail(404, "not_found", "Check not found.");
+  if (result !== null && !["pass", "no_pass", "flag"].includes(result)) fail(422, "invalid_request", "Choose pass, no_pass or flag, or null to revert.");
+  if (result !== null && !reason?.trim()) fail(422, "invalid_request", "A reason is required to override this check.");
+  const gate = await reviewerGate(evaluation, principalId, "override", criterionId);
+  const from = check.effective_result;
+  if (result === null) {
+    if (!check.override) return copy(evaluation);
+    check.override = null;
+    check.effective_result = check.result;
+  } else {
+    check.override = { result, reason: reason!.trim(), by: principalId, role: principal(principalId).role, via, ts: timestamp(), gate };
+    check.effective_result = result;
+  }
+  evaluation.effective_recommendation = evaluation.checks.some((item) => item.effective_result === "no_pass") ? "no_pass" : "pass";
+  await audit({ actor: actor(principalId), event: result === null ? "check.override_reverted" : "check.overridden", txn_id: evaluation.txn_id,
+    ref: { collection: "evaluations", id: evalId }, detail: result === null
+      ? { criterion_id: criterionId, from, to: check.result }
+      : { criterion_id: criterionId, kind: check.kind, from, to: result, reason: reason!.trim(), via, gate } });
+  return copy(evaluation);
+}
+
 const cad = (amount: number) => `CAD ${amount.toLocaleString("en-CA")}`;
 type Facts = [label: string, value: string][];
 
 function checksFor(txn: Transaction): Check[] {
-  const learned = memories.find((memory) => memory.kind === "adjustment");
+  const learned = memories.find((memory) => memory.kind === "adjustment" && memory.scope?.criterion_id === "C-04" && memory.condition === "customer segment is payroll and date is within 3 days of month-end");
   const customer = customers.find((item) => item.customer_id === txn.customer_id)!;
   const cheque = txn.type === "cheque";
   const injection = txn.txn_id === "TXN-0002";
@@ -124,7 +172,7 @@ function checksFor(txn: Transaction): Check[] {
   const party = txn.counterparty;
   const details = (txn.type_specific ?? {}) as { international?: boolean; new_beneficiary?: boolean; cheque_date?: string };
   const check = (criterion_id: string, description: string, result: Check["result"], evidence: string, explanation: string, facts: Facts, regulation_ref: string, judgment = false): Check => ({
-    criterion_id, description, kind: judgment ? "judgment" : "hard", source: judgment ? "llm" : "rule", result, evidence, explanation,
+    criterion_id, description, kind: judgment ? "judgment" : "hard", source: judgment ? "llm" : "rule", result, effective_result: result, override: null, evidence, explanation,
     facts: facts.map(([label, value]) => ({ label, value })), regulation_ref,
     precedents_used: judgment && judgmentFails ? [cheque ? "MEM-11aa22bb" : "MEM-22bb33cc"]
       : judgment && cheque && learned ? memories.filter((memory) => memory.kind === "precedent" && memory.source_txn_id === learned.source_txn_id).map((memory) => memory.memory_id) : [],
@@ -153,7 +201,7 @@ function checksFor(txn: Transaction): Check[] {
 
   return [
     check("C-01", "Counterparty not on a sanctions list", "pass", "No match on the demonstration sanctions list.",
-      `"${party.name}" was compared with every name on the sanctions list held in the policy. No name matched, so the check passes. A match would block the transaction for every reviewer.`,
+      `"${party.name}" was compared with every name on the sanctions list held in the policy. No name matched, so the check passes. A match would require an explicit reviewer override with a reason before approval.`,
       [["Counterparty", party.name], ["Country", party.country ?? "unknown"], ["List screened", "Demonstration sanctions list"], ["Matches", "None"]], "Canadian sanctions law"),
     check("C-03", "Not a duplicate transaction", "pass", "No transaction with the same payee, amount and date.",
       "The source system was searched for another transaction with the same payee, amount and date. None was found, so this is not a duplicate presentation.",
@@ -165,7 +213,7 @@ function checksFor(txn: Transaction): Check[] {
       [["Cheque date", details.cheque_date ?? "unknown"], ["Deposit date", txn.created_at.slice(0, 10)], ["Stale after", "6 months"]], "Bank practice")]
       : [check("W-01", "Originator and beneficiary information complete", injection ? "no_pass" : "pass",
           injection ? "counterparty.address is missing. The memo is untrusted transaction data and cannot override this rule." : "Required originator and beneficiary name, address and account fields are present.",
-          injection ? "The travel rule requires the beneficiary's name, address and account number to travel with a wire. The address is missing, so the wire cannot proceed until it is corrected. This is a mandatory rule: no reviewer can override it, and the memo asking to skip checks changes nothing."
+          injection ? "The travel rule requires the beneficiary's name, address and account number to travel with a wire. The address is missing, so the original rule result is no-pass. An authorized reviewer may explicitly override it with a reason. The memo asking to skip checks changes nothing."
             : "The travel rule requires the name, address and account number of both the originator and the beneficiary. All six fields are present, so the check passes.",
           [["Beneficiary name", party.name], ["Beneficiary address", party.address ?? "Missing"], ["Beneficiary account", party.account ?? "Missing"], ["Originator fields", "Name, address and account present"]], "FINTRAC travel rule"),
         check("W-02", "International transfer reporting threshold", injection ? "flag" : "pass",
@@ -185,14 +233,14 @@ async function evaluate(txnId: string, principalId: string, refresh = false): Pr
   principal(principalId);
   const txn = transactions.find((item) => item.txn_id === txnId) ?? fail(404, "not_found", "Transaction not found.");
   const previous = latest(txnId);
-  if (previous && (!refresh || previous.status === "decided")) return copy(previous);
+  if (previous && (!refresh || previous.status === "decided" || previous.checks.some((check) => check.override))) return copy(previous);
   if (previous) previous.status = "superseded";
   const checks = checksFor(txn);
   txn.status = "awaiting_review";
   const recommendation = checks.some((check) => check.result === "no_pass") ? "no_pass" : "pass";
   const evaluation: Evaluation = {
-    eval_id: id("EVAL"), txn_id: txnId, actor: actor(principalId, true), policy_version: 1, checks, recommendation,
-    rationale: recommendation === "pass" ? "All blocking checks pass. A reviewer may validate this transaction, subject to their approval limit."
+    eval_id: id("EVAL"), txn_id: txnId, actor: actor(principalId, true), policy_version: 1, checks, recommendation, effective_recommendation: recommendation,
+    rationale: recommendation === "pass" ? "All blocking checks pass. A reviewer may approve this transaction, subject to their approval limit."
       : txnId === "TXN-0002" ? "The missing beneficiary address blocks the wire. The unusual amount also needs reviewer context; the memo cannot change the checks."
         : "The payroll cheque is unusually large for this customer. A reviewer can supply context for the judgment check.",
     precedents_used: [...new Set(checks.flatMap((check) => check.precedents_used))],
@@ -215,15 +263,20 @@ export const fixtures = {
       return { txn_id: txn.txn_id, type: txn.type, amount: txn.amount, currency: txn.currency, customer_name: customers.find((customer) => customer.customer_id === txn.customer_id)!.name,
         counterparty_name: txn.counterparty.name, memo: txn.memo, status: txn.status, created_at: txn.created_at,
         eval_id: evaluation?.eval_id ?? null, recommendation: evaluation?.recommendation ?? null,
-        failed_checks: evaluation?.checks.filter((check) => check.result === "no_pass").map((check) => check.criterion_id) ?? [] };
+        effective_recommendation: evaluation?.effective_recommendation ?? null, override_count: evaluation?.checks.filter((check) => check.override).length ?? 0,
+        failed_checks: evaluation?.checks.filter((check) => check.effective_result === "no_pass").map((check) => check.criterion_id) ?? [] };
     }) };
   },
   evaluate: async (txnId: string, principalId: string, refresh = false) => { await pause(); return evaluate(txnId, principalId, refresh); },
   evaluation: async (evalId: string) => { await pause(); return copy(findEvaluation(evalId)); },
+  overrideCheck: async (evalId: string, criterionId: string, principalId: string, result: CheckResult | null, reason?: string) => {
+    await pause(); return overrideCheck(evalId, criterionId, principalId, result, reason, "panel");
+  },
   evaluatePending: async (principalId: string, refresh = false): Promise<EvaluatePendingResponse> => {
     await pause(); principal(principalId);
     const result: EvaluatePendingResponse = { evaluated: [], failed: [] };
     for (const txn of transactions.filter((txn) => txn.status === "pending" || (refresh && txn.status === "awaiting_review"))) {
+      if (latest(txn.txn_id)?.checks.some((check) => check.override)) continue;
       const previous = latest(txn.txn_id)?.recommendation;
       const evaluation = await evaluate(txn.txn_id, principalId, refresh);
       result.evaluated.push({ txn_id: txn.txn_id, eval_id: evaluation.eval_id, recommendation: evaluation.recommendation, changed: previous !== undefined && previous !== evaluation.recommendation });
@@ -232,39 +285,49 @@ export const fixtures = {
   },
   decide: async (evalId: string, principalId: string, verdict: Verdict, comments?: string): Promise<DecideResponse> => {
     await pause(); const person = principal(principalId); const evaluation = findEvaluation(evalId);
-    if (evaluation.status !== "awaiting_review") fail(409, "already_decided", "This evaluation is already decided or has been superseded. Refresh the transaction.");
-    if (verdict !== "validated" && !comments?.trim()) fail(422, "invalid_request", "Comments are required for this decision.");
+    assertReviewable(evaluation);
+    if (verdict !== "approved" && verdict !== "rejected") fail(422, "invalid_request", "Choose approved or rejected.");
     const txn = transactions.find((item) => item.txn_id === evaluation.txn_id)!;
-    const rule_id = person.role === "analyst" ? "D-01" : person.role === "supervisor" ? "D-02" : null;
-    const denial = !rule_id ? { message: "This role has no permission to decide transactions.", reason: "no decision rule" }
-      : person.approval_limit != null && txn.amount > person.approval_limit ? { message: `Amount ${txn.amount} exceeds analyst limit ${person.approval_limit}. A supervisor must decide.`, reason: "amount over limit" }
-        : verdict !== "rejected" && evaluation.checks.some((check) => check.kind === "hard" && check.result === "no_pass") ? { message: "A mandatory rule failed. No reviewer can override a hard check.", reason: "hard check failed" } : null;
-    if (denial) {
-      const gate: Gate = { result: "deny", rule_id, reason: denial.reason };
-      await audit({ actor: actor(principalId), event: "decision.denied", txn_id: txn.txn_id, ref: { collection: "evaluations", id: evalId }, detail: { verdict, amount: txn.amount, gate } });
-      throw new FixtureError(403, { error: { code: "gate_denied", message: denial.message }, gate });
+    const gate = await reviewerGate(evaluation, principalId, "decision", null, verdict);
+    const blocking_checks = evaluation.checks.filter((check) => check.effective_result === "no_pass").map((check) => check.criterion_id);
+    if (verdict === "approved" && blocking_checks.length) {
+      throw new FixtureError(409, { error: { code: "checks_not_cleared", message: `Clear ${blocking_checks.join(" and ")} before approving.` }, blocking_checks });
     }
-    const decision = { decision_id: id("DEC"), eval_id: evalId, txn_id: txn.txn_id, reviewer_id: principalId, verdict, comments: comments?.trim() || null,
-      agreed_with_agent: (verdict !== "rejected") === (evaluation.recommendation === "pass"),
-      gate: { result: "allow" as const, rule_id, reason: person.role === "analyst" ? "analyst within limit" : "supervisor authorized" }, ts: timestamp() };
+    if (verdict === "rejected" && evaluation.effective_recommendation === "pass" && !comments?.trim()) {
+      fail(422, "invalid_request", "A comment is required when rejecting an effective pass.");
+    }
+    const overrides: Decision["overrides"] = evaluation.checks.flatMap((check) => check.override ? [{ criterion_id: check.criterion_id,
+      kind: check.kind, from: check.result, to: check.effective_result, reason: check.override.reason, via: check.override.via }] : []);
+    const decision: Decision = { decision_id: id("DEC"), eval_id: evalId, txn_id: txn.txn_id, reviewer_id: principalId, verdict, comments: comments?.trim() || null,
+      agreed_with_agent: (verdict === "approved") === (evaluation.recommendation === "pass"),
+      effective_recommendation: evaluation.effective_recommendation, overrides: copy(overrides), gate, ts: timestamp() };
     txn.status = verdict === "rejected" ? "rejected" : "passed";
     evaluation.status = "decided"; evaluation.decision = decision; evaluation.transaction = copy(txn);
-    await audit({ actor: actor(principalId), event: "decision.recorded", txn_id: txn.txn_id, ref: { collection: "decisions", id: decision.decision_id }, detail: { verdict, agreed_with_agent: decision.agreed_with_agent, gate: decision.gate } });
+    await audit({ actor: actor(principalId), event: "decision.recorded", txn_id: txn.txn_id, ref: { collection: "decisions", id: decision.decision_id },
+      detail: { verdict, agreed_with_agent: decision.agreed_with_agent, effective_recommendation: decision.effective_recommendation, overrides: overrides.map((override) => override.criterion_id), gate } });
     const created: StoredMemory[] = [];
-    if (txn.type === "cheque" && verdict === "validated_with_comments" && /payroll/i.test(comments ?? "") && /month.?end/i.test(comments ?? "") && !memories.some((memory) => memory.kind === "adjustment")) {
-      created.push({ memory_id: "MEM-5e6f7a8b", kind: "adjustment", text: "For payroll customers, cheque amounts several times the typical amount at month-end are expected. Do not fail C-04 for that reason alone.", condition: "customer segment is payroll and date is within 3 days of month-end", author_id: principalId, author_name: person.name, source_txn_id: txn.txn_id, verdict, created_at: timestamp() });
+    for (const check of evaluation.checks) {
+      if (verdict !== "approved" || check.kind !== "judgment" || !check.override) continue;
+      const override = check.override;
+      const payroll = txn.type === "cheque" && check.criterion_id === "C-04" && /payroll/i.test(override.reason) && /month.?end/i.test(override.reason);
+      const condition = payroll ? "customer segment is payroll and date is within 3 days of month-end" : `customer segment is ${evaluation.customer.segment} and transaction type is ${txn.type}`;
+      const text = payroll ? "For payroll customers, cheque amounts several times the typical amount at month-end are expected. Do not fail C-04 for that reason alone."
+        : `Reviewer guidance for ${check.criterion_id}: ${override.reason}`;
+      created.push({ memory_id: id("MEM"), kind: "adjustment", text, condition, scope: { criterion_id: check.criterion_id, condition },
+        author_id: override.by, author_name: principal(override.by).name, source_txn_id: txn.txn_id, verdict, created_at: timestamp() });
     }
-    created.push({ memory_id: id("MEM"), kind: "precedent", text: `${txn.type === "wire" ? "Wire" : "Cheque"}, CAD ${txn.amount.toLocaleString("en-CA")}, ${evaluation.customer.segment}: ${verdict.replaceAll("_", " ")} by ${person.name}.${comments?.trim() ? ` ${comments.trim()}` : ""}`, author_id: principalId, author_name: person.name, source_txn_id: txn.txn_id, verdict, created_at: timestamp() });
+    const overrideSummary = overrides.length ? ` Overrides: ${overrides.map((override) => `${override.criterion_id} ${override.from} to ${override.to}: ${override.reason}`).join("; ")}.` : "";
+    created.push({ memory_id: id("MEM"), kind: "precedent", text: `${txn.type === "wire" ? "Wire" : "Cheque"}, CAD ${txn.amount.toLocaleString("en-CA")}, ${evaluation.customer.segment}: ${verdict} by ${person.name}.${comments?.trim() ? ` ${comments.trim()}` : ""}${overrideSummary}`, author_id: principalId, author_name: person.name, source_txn_id: txn.txn_id, verdict, created_at: timestamp() });
     for (const memory of created) {
       memories.push(memory);
-      await audit({ actor: actor(principalId, true), event: "memory.created", txn_id: txn.txn_id, ref: { collection: "memory", id: memory.memory_id }, detail: { kind: memory.kind, criterion_id: memory.kind === "adjustment" ? "C-04" : null, source_decision_id: decision.decision_id, author_id: principalId } });
+      await audit({ actor: actor(principalId, true), event: "memory.created", txn_id: txn.txn_id, ref: { collection: "memory", id: memory.memory_id }, detail: { kind: memory.kind, criterion_id: memory.scope?.criterion_id ?? null, source_decision_id: decision.decision_id, author_id: memory.author_id } });
     }
     return copy({ decision, transaction_status: txn.status, memory_created: created.map(({ memory_id, kind, text }) => ({ memory_id, kind, text })) });
   },
   references: async (evalId: string, criterionId: string): Promise<ReferencesResponse> => {
     await pause(); const evaluation = findEvaluation(evalId);
     const check = evaluation.checks.find((item) => item.criterion_id === criterionId) ?? fail(404, "not_found", "Check not found.");
-    return copy({ check: { criterion_id: criterionId, result: check.result, source: check.source, evidence: check.evidence, explanation: check.explanation ?? check.evidence, facts: check.facts ?? [] },
+    return copy({ check: { criterion_id: criterionId, result: check.result, effective_result: check.effective_result, override: check.override, source: check.source, evidence: check.evidence, explanation: check.explanation ?? check.evidence, facts: check.facts ?? [] },
       policy: { txn_type: evaluation.transaction.type, version: evaluation.policy_version, criterion_id: criterionId, description: check.description, kind: check.kind, regulation_ref: check.regulation_ref ?? "Bank policy", params: criterionId === "C-04" ? { ratio_hint: 3 } : {} },
       adjustments: memories.filter((memory) => check.adjustments_used.includes(memory.memory_id)).map((memory) => ({ memory_id: memory.memory_id, text: memory.text, condition: memory.condition!, author_id: memory.author_id, author_name: memory.author_name, source_txn_id: memory.source_txn_id!, created_at: memory.created_at })),
       precedents: memories.filter((memory) => check.precedents_used.includes(memory.memory_id)).map(({ memory_id, text, author_id, author_name, source_txn_id, verdict, created_at }) => ({ memory_id, text, author_id, author_name, source_txn_id, verdict, created_at })),
@@ -273,6 +336,34 @@ export const fixtures = {
   ask: async (evalId: string, principalId: string, question: string): Promise<AskResponse> => {
     await pause(); principal(principalId); const evaluation = findEvaluation(evalId);
     if (!question.trim()) fail(422, "invalid_request", "Enter a question.");
+    // Intent is extracted only from this reviewer message, never stored text.
+    const command = question.trim().match(/^(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:switch|set|change|override|mark)\s+(?:check\s+)?((?:C|W|Q)-\d{2})\s+(?:(?:to|as)\s+)?(no[_ -]?pass|pass|flag)\b([\s\S]*)$/i);
+    const revert = question.trim().match(/^(?:please\s+)?(?:revert|remove|clear)\s+(?:the\s+)?(?:override\s+(?:on|for)\s+)?((?:C|W|Q)-\d{2})(?:\s+override)?[.!?]?$/i);
+    if (command || revert) {
+      assertReviewable(evaluation);
+      const criterionId = (command?.[1] ?? revert![1]).toUpperCase();
+      const check = evaluation.checks.find((item) => item.criterion_id === criterionId) ?? fail(404, "not_found", "That check is not on the focused evaluation.");
+      const result = command ? command[2].toLowerCase().replace(/[ -]/g, "_") as CheckResult : null;
+      const reason = command?.[3].match(/^[\s,.:;-]*(?:because|since|reason\s*:)\s*([\s\S]*)$/i)?.[1].trim();
+      const report: OverrideReport = { criterion_id: criterionId, from: check.effective_result, to: result ?? check.result, status: "applied" };
+      const citations = [{ type: "policy" as const, ref: criterionId, label: check.description }];
+      if (result !== null && !reason) {
+        return copy({ answer: `Please give a reason to change ${criterionId} to ${result.replaceAll("_", "-").toUpperCase()}. No check has changed.`, citations,
+          thread: evaluation.thread, override: { ...report, status: "needs_reason" } });
+      }
+      try {
+        await overrideCheck(evalId, criterionId, principalId, result, reason, "chat");
+      } catch (error) {
+        if (!(error instanceof FixtureError) || error.status !== 403) throw error;
+        return copy({ answer: `${error.message} No check has changed.`, citations, thread: evaluation.thread, override: { ...report, status: "denied" } });
+      }
+      const display = (value: CheckResult) => value.replaceAll("_", "-").toUpperCase();
+      const answer = result === null ? `Reverted the override for ${criterionId}: ${display(report.from)} to the original ${display(report.to)}.`
+        : `Recorded your override for ${criterionId}: ${display(report.from)} to ${display(report.to)}. Reason: ${reason}`;
+      evaluation.thread.push({ question, answer, citations, asked_by: principalId, ts: timestamp() });
+      await audit({ actor: actor(principalId, true), event: "question.answered", txn_id: evaluation.txn_id, ref: { collection: "evaluations", id: evalId }, detail: { question, citations } });
+      return copy({ answer, citations, thread: evaluation.thread, override: report, evaluation });
+    }
     const namedCriterion = question.match(/\b(?:C|W|Q)-\d{2}\b/i)?.[0].toUpperCase();
     const check = evaluation.checks.find((item) => item.criterion_id === namedCriterion)
       ?? evaluation.checks.find((item) => item.kind === "hard" && item.result === "no_pass")
@@ -280,11 +371,12 @@ export const fixtures = {
     const used = memories.filter((memory) => [...check.adjustments_used, ...check.precedents_used].includes(memory.memory_id));
     // Hard checks use no precedent, but the question can retrieve a relevant case.
     if (evaluation.txn_id === "TXN-0002" && !used.length) used.push(memories.find((memory) => memory.memory_id === "MEM-22bb33cc")!);
-    const answer = `${check.criterion_id}: ${check.evidence}${used.length ? ` ${used.map((memory) => memory.text).join(" ")}` : " No additional precedent was used for this check."}`;
+    const overrideContext = check.override ? ` The original result is ${check.result}; the effective result is ${check.effective_result} after ${check.override.by}'s override: ${check.override.reason}` : "";
+    const answer = `${check.criterion_id}: ${check.evidence}${overrideContext}${used.length ? ` ${used.map((memory) => memory.text).join(" ")}` : " No additional precedent was used for this check."}`;
     const citations = [{ type: "policy" as const, ref: check.criterion_id, label: check.description }, ...used.map((memory) => ({ type: memory.kind, ref: memory.memory_id, label: memory.text }))];
     evaluation.thread.push({ question, answer, citations, asked_by: principalId, ts: timestamp() });
     await audit({ actor: actor(principalId, true), event: "question.answered", txn_id: evaluation.txn_id, ref: { collection: "evaluations", id: evalId }, detail: { question, citations } });
-    return copy({ answer, citations, thread: evaluation.thread });
+    return copy({ answer, citations, thread: evaluation.thread, override: null });
   },
   chat: async (principalId: string, message: string): Promise<ChatResponse> => {
     await pause(); principal(principalId);
@@ -292,7 +384,7 @@ export const fixtures = {
     const adjustment = memories.find((memory) => memory.kind === "adjustment");
     const payroll = /payroll|learn|memory|cheque/i.test(message);
     const answer = payroll ? adjustment ? `${adjustment.text} Learned from ${adjustment.author_name}, source ${adjustment.source_txn_id}.` : "C-04 asks whether the amount fits the customer's usual profile. No payroll month-end adjustment has been learned yet."
-      : "W-02 flags international wires of CAD 10,000 or more for EFT reporting. A reporting flag does not block approval; missing mandatory beneficiary information under W-01 does.";
+      : "W-02 flags international wires of CAD 10,000 or more for EFT reporting. A reporting flag does not block approval. W-01 fails when mandatory beneficiary information is missing; its effective no-pass must be cleared by an authorized reviewer with a reason before approval.";
     const citations: ChatResponse["citations"] = payroll ? [{ type: "policy", ref: "C-04", label: "Amount consistent with customer profile" }, ...(adjustment ? [{ type: "adjustment" as const, ref: adjustment.memory_id, label: `Learned from ${adjustment.author_name}` }] : [])]
       : [{ type: "policy", ref: "W-02", label: "International EFT reporting" }, { type: "policy", ref: "W-01", label: "Travel-rule fields" }];
     await audit({ actor: actor(principalId, true), event: "question.answered", txn_id: null, ref: { collection: "policies", id: payroll ? "cheque-v1" : "wire-v1" }, detail: { question: message, citations } });

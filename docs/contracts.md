@@ -7,7 +7,6 @@ Contents: [1 Conventions](#1-conventions) · [2 Enums](#2-enums) · [3 Collectio
 
 ---
 
-> **Pending proposal:** the Approve / Reject verdicts and the check-override fields (section 8, and the lines in sections 2, 3.4, 4 and 5 that mention `approved`, `effective_result` or `override`) are proposed and not agreed yet.
 
 ## 1. Conventions
 
@@ -445,7 +444,7 @@ LangGraph `TypedDict` states. Keys only; values follow the shapes above.
 
 ## 8. Check overrides and decisions
 
-**Status: proposed, not agreed yet.** Waiting for Ben and Zach to confirm. Do not build against this section until this line is removed. Once agreed: where this section and an earlier example disagree, this section wins.
+Agreed by the team (Facundo, Ben, Zach). Where this section and an earlier example disagree, this section wins.
 
 ### 8.1 Rules
 1. The reviewer has two decisions on a transaction: **Approve** (`approved`) and **Reject** (`rejected`).

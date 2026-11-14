@@ -6,7 +6,15 @@ from typing import Any
 
 def public_data(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: public_data(item) for key, item in value.items() if key != "_id"}
+        data = {key: public_data(item) for key, item in value.items() if key != "_id"}
+        # Older evaluations retain their original results; supply the new view
+        # fields in responses only, without migrating or changing stored data.
+        if "criterion_id" in data and "result" in data:
+            data.setdefault("effective_result", data["result"])
+            data.setdefault("override", None)
+        if "checks" in data and "recommendation" in data:
+            data.setdefault("effective_recommendation", data["recommendation"])
+        return data
     if isinstance(value, (list, tuple)):
         return [public_data(item) for item in value]
     if isinstance(value, datetime):
