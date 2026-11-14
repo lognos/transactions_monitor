@@ -72,6 +72,7 @@ Fill in your `MONGODB_URI` and LLM API keys in `.env`.
 ├── .env.example                     # Environment variables template
 ├── .gitignore                       # Git ignore rules for secrets and build artifacts
 ├── README.md                        # Project documentation
+├── implementation_plan.md           # 4-hour build plan, scenarios, acceptance tests & demo script
 ├── hackathon.md                     # Hackathon rules & reference guide
 └── payment_exception_audit_agent.md # Detailed system spec & Atlas schema design
 ```
