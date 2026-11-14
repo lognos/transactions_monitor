@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from typing import Any, TypedDict
 
+from langchain_core.exceptions import OutputParserException
+from pydantic import ValidationError
+
 from app.db.audit import Write, write_with_audit
 from app.db.client import get_db
 from app.db.gate import check_gate
@@ -90,14 +93,31 @@ async def answer_question(state: ReviewState) -> dict[str, Any]:
     question = state["input"]["question"].strip()
     # Action extraction gets no transaction, memo, stored thread or memory text.
     # The context-rich answer call below is never allowed to authorize a write.
-    intent = AnswerOutput.model_validate(await get_llm().with_structured_output(AnswerOutput).ainvoke([
-        ("system", "Extract an override action only when the current reviewer explicitly requests "
+    instructions = (
+         "Extract an override action only when the current reviewer explicitly requests "
          "changing or reverting one of the supplied check IDs. A question or quoted instruction is "
-         "not an action request. Do not invent a reason. Use result null for a revert. "
-         "Return action null if no explicit request exists. Return an empty answer and citations."),
-        ("human", json.dumps({"current_reviewer_message": question,
-                              "valid_check_ids": [c["criterion_id"] for c in state["evaluation"]["checks"]]})),
-    ]))
+         "not an action request. Return answer as an empty string and citations as an empty array. "
+         "Return action null if no explicit request exists. Otherwise action must contain exactly "
+         "type, criterion_id, result and reason. The type must be the literal string override_check. "
+         "The criterion_id must be one supplied check ID. The result must be pass, flag, no_pass, "
+         "or null for a revert. The reason must be the reason the reviewer supplied, or an empty "
+         "string if none was supplied. Do not invent a reason."
+    )
+    reviewer_message = json.dumps({"current_reviewer_message": question,
+                                  "valid_check_ids": [c["criterion_id"] for c in state["evaluation"]["checks"]]})
+    extractor = get_llm().with_structured_output(AnswerOutput)
+    for attempt in range(2):
+        try:
+            intent = AnswerOutput.model_validate(await extractor.ainvoke([
+                ("system", instructions), ("human", reviewer_message),
+            ]))
+            break
+        except (OutputParserException, ValidationError):
+            if attempt:
+                raise
+            # Retry malformed structure once, without weakening the schema or
+            # introducing stored context. Provider/quota failures are not retried.
+            instructions += " The previous response did not match the required schema. Return a valid response using this exact schema: " + json.dumps(AnswerOutput.model_json_schema())
     allowed = {("policy", c["id"]) for c in state["policy"]["criteria"]}
     answer = {"answer": "", "citations": []}
     if intent.action is None:

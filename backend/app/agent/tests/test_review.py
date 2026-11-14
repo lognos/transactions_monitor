@@ -138,6 +138,44 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['evaluation']['checks'][0]['override']['via'], 'chat')
         self.assertEqual(result['answer']['answer'], 'Updated C-04 to pass.')
 
+    async def test_chat_retries_malformed_intent_once_without_writing_for_missing_reason(self):
+        from langchain_core.exceptions import OutputParserException
+        marker = 'STORED_CONTEXT_MUST_NOT_AUTHORIZE_OVERRIDE'
+        self.txn['memo'] = marker
+        self.invoke.side_effect = [
+            OutputParserException('Invalid action type'),
+            {'answer': '', 'citations': [], 'action': {
+                'type': 'override_check', 'criterion_id': 'C-04', 'result': 'pass', 'reason': ''}},
+        ]
+        result = await self.run_review(kind='question', question='Switch C-04 to pass')
+        self.assertEqual(result['override']['status'], 'needs_reason')
+        self.assertEqual(result['evaluation']['thread'], [])
+        self.assertEqual(self.invoke.await_count, 2)
+        for call in self.invoke.await_args_list:
+            self.assertNotIn(marker, str(call))
+            self.assertIn('override_check', str(call))
+        self.assertIn('required schema', str(self.invoke.await_args_list[1]))
+        self.audit.assert_not_awaited()
+        self.gate.assert_not_awaited()
+
+    async def test_persistently_malformed_chat_intent_fails_closed(self):
+        from pydantic import ValidationError
+        self.invoke.return_value = {'answer': '', 'citations': [], 'action': {
+            'type': 'override', 'criterion_id': 'C-04', 'result': 'pass'}}
+        with self.assertRaises(ValidationError):
+            await self.run_review(kind='question', question='Switch C-04 to pass')
+        self.assertEqual(self.invoke.await_count, 2)
+        self.audit.assert_not_awaited()
+        self.gate.assert_not_awaited()
+
+    async def test_chat_provider_failure_is_not_retried(self):
+        self.invoke.side_effect = RuntimeError('provider quota exceeded')
+        with self.assertRaises(RuntimeError):
+            await self.run_review(kind='question', question='Switch C-04 to pass')
+        self.invoke.assert_awaited_once()
+        self.audit.assert_not_awaited()
+        self.gate.assert_not_awaited()
+
     async def test_hard_override_never_creates_adjustment(self):
         self.evaluation['checks'][0]['kind'] = 'hard'
         self.evaluation['checks'][0]['criterion_id'] = 'Q-01'
