@@ -18,6 +18,7 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
         self.db = db
         db.evaluations.find_one = AsyncMock(side_effect=lambda *a, **kw: deepcopy(self.evaluation))
         db.transactions.find_one = AsyncMock(return_value=self.txn)
+        db.customers.find_one = AsyncMock(return_value={'customer_id': 'CUS-1', 'segment': 'payroll'})
         db.principals.find_one = AsyncMock(return_value={'_id': 'ana', 'type': 'human', 'role': 'analyst'})
         db.policies.find_one = AsyncMock(return_value=self.policy)
         db.decisions.find_one = AsyncMock(return_value=None)
@@ -250,3 +251,27 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
         audit.assert_not_awaited()
         model.assert_not_called()
         self.db.policies.find_one.assert_not_awaited()
+
+    async def test_refresh_of_new_transaction_does_not_require_old_evaluation(self):
+        from app.agent.graphs import evaluate
+        self.db.__getitem__.side_effect = lambda name: getattr(self.db, name)
+        self.db.evaluations.find_one.side_effect = None
+        self.db.evaluations.find_one.return_value = None
+        self.db.policies.find_one.return_value = {'version': 1, 'criteria': []}
+        with patch.object(evaluate, 'get_db', return_value=self.db), \
+             patch.object(evaluate, 'search_memory', new=AsyncMock(return_value=[])), \
+             patch.object(evaluate, 'active_adjustments', new=AsyncMock(return_value=[])), \
+             patch.object(evaluate, 'write_with_audit', new=AsyncMock()) as audit:
+            result = await evaluate.evaluate_graph.ainvoke({'txn_id': 'TXN-1', 'principal_id': 'ana', 'refresh': True})
+        self.assertEqual(result['evaluation']['effective_recommendation'], 'pass')
+        writes = audit.call_args.kwargs['writes']
+        self.assertEqual([(w.collection, w.op) for w in writes], [('evaluations', 'insert'), ('transactions', 'update')])
+
+    async def test_review_includes_customer_context_in_precedent(self):
+        result = await self.run_review(kind='decision', verdict='approved')
+        self.assertIn('payroll customer', result['memory_created'][0]['text'])
+
+    async def test_revert_without_override_is_noop(self):
+        await self.run_review(kind='override', criterion_id='C-04', result=None)
+        self.audit.assert_not_awaited()
+        self.invoke.assert_not_awaited()

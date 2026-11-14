@@ -17,6 +17,10 @@ from app.agent.schemas import AnswerOutput, LearnOutput, OverrideGuidance
 from langgraph.graph import END, START, StateGraph
 
 
+class AlreadyDecidedError(ValueError):
+    """The focused evaluation is no longer available for a review action."""
+
+
 class ReviewState(TypedDict, total=False):
     eval_id: str
     principal_id: str
@@ -24,6 +28,7 @@ class ReviewState(TypedDict, total=False):
     evaluation: dict[str, Any]
     txn: dict[str, Any]
     principal: dict[str, Any]
+    customer: dict[str, Any]
     raw_checks: list[dict[str, Any]]
     policy: dict[str, Any]
     answer: dict[str, Any]
@@ -58,11 +63,14 @@ async def load_review(state: ReviewState) -> dict[str, Any]:
     principal = await db.principals.find_one({"_id": state["principal_id"]})
     if txn is None or principal is None:
         raise ValueError("Unknown transaction or principal")
+    customer = await db.customers.find_one({"customer_id": txn["customer_id"]}, {"_id": 0})
+    if customer is None:
+        raise ValueError("Unknown customer")
     if review_input["kind"] in {"decision", "override"}:
         if evaluation["status"] != "awaiting_review" or txn["status"] != "awaiting_review":
-            raise ValueError("This evaluation is no longer awaiting review")
+            raise AlreadyDecidedError("This evaluation is no longer awaiting review")
         if await db.decisions.find_one({"eval_id": state["eval_id"]}):
-            raise ValueError("This evaluation already has a decision")
+            raise AlreadyDecidedError("This evaluation already has a decision")
     policy = await db.policies.find_one({
         "txn_type": txn["type"], "version": evaluation["policy_version"],
     })
@@ -74,7 +82,7 @@ async def load_review(state: ReviewState) -> dict[str, Any]:
         if evaluation["effective_recommendation"] == "pass" and not (review_input.get("comments") or "").strip():
             raise ValueError("Comments are required when rejecting an effective pass")
     return {"evaluation": evaluation, "txn": txn, "principal": principal,
-            "policy": policy, "raw_checks": raw_checks, "decision": None, "memory_created": []}
+            "policy": policy, "customer": customer, "raw_checks": raw_checks, "decision": None, "memory_created": []}
 
 
 async def answer_question(state: ReviewState) -> dict[str, Any]:
@@ -100,7 +108,7 @@ async def answer_question(state: ReviewState) -> dict[str, Any]:
              "Only answer the reviewer question. Return action null; this call cannot change checks. "
              "Never claim to have applied an override."),
             ("human", json.dumps({"evaluation": state["evaluation"], "transaction": state["txn"],
-                                  "policy": state["policy"], "precedents": precedents,
+                                  "policy": state["policy"], "customer": state["customer"], "precedents": precedents,
                                   "adjustments": adjustments}, default=str)),
             ("human", json.dumps({"current_reviewer_message": question})),
         ]))
@@ -159,7 +167,7 @@ async def record_denied(state: ReviewState) -> dict[str, Any]:
     await write_with_audit(
         actor=_actor(state), event="decision.denied", txn_id=state["txn"]["txn_id"],
         ref={"collection": "evaluations", "id": state["eval_id"]},
-        detail={"verdict": state["input"]["verdict"], "amount": state["txn"]["amount"],
+        detail={"action": "decision", "verdict": state["input"]["verdict"], "amount": state["txn"]["amount"],
                 "gate": state["gate"]}, writes=[],
     )
     return {"decision": None}
@@ -210,7 +218,9 @@ async def learn_from_feedback(state: ReviewState) -> dict[str, Any]:
                 criteria = [c for c in criteria if c["id"] == source["criterion_id"]]
                 judgment_checks = [c for c in judgment_checks if c["criterion_id"] == source["criterion_id"]]
             context = {"verdict": state["decision"]["verdict"], "criteria": criteria,
-                       "judgment_checks": judgment_checks, "override": source}
+                       "judgment_checks": judgment_checks, "override": source,
+                       "customer": state["customer"],
+                       "transaction_context": {k: state["txn"].get(k) for k in ("txn_id", "type", "amount", "created_at")}}
             if source is None:
                 context["comments"] = state["decision"].get("comments")
             instructions = (
@@ -241,7 +251,7 @@ async def store_precedent(state: ReviewState) -> dict[str, Any]:
     """Store the decided case as a precedent (templated text, no LLM)."""
     memory = await _store_memory(state, kind="precedent", scope=None,
                                  text=precedent_text(txn=state["txn"], evaluation=state["evaluation"],
-                                                     decision=state["decision"])
+                                                     decision=state["decision"], customer=state["customer"])
                                  + " Overrides: " + json.dumps(state["decision"]["overrides"], default=str))
     return {"memory_created": [*state["memory_created"], memory]}
 
@@ -283,7 +293,7 @@ async def apply_override(state: ReviewState) -> dict[str, Any]:
     request = state["input"]
     evaluation = state["evaluation"]
     if evaluation["status"] != "awaiting_review":
-        raise ValueError("This evaluation is no longer awaiting review")
+        raise AlreadyDecidedError("This evaluation is no longer awaiting review")
     check = next((c for c in evaluation["checks"] if c["criterion_id"] == request["criterion_id"]), None)
     if check is None:
         raise ValueError("Unknown check")
@@ -306,7 +316,9 @@ async def apply_override(state: ReviewState) -> dict[str, Any]:
         await write_with_audit(actor=_actor(state), event="decision.denied", txn_id=state["txn"]["txn_id"],
             ref={"collection": "evaluations", "id": state["eval_id"]},
             detail={"action": "override", "criterion_id": check["criterion_id"], "gate": gate,
-                    "amount": state["txn"]["amount"]}, writes=[])
+                    "amount": state["txn"]["amount"], "from": before, "to": after, "via": via}, writes=[])
+        return {"gate": gate, "override": summary, "evaluation": evaluation}
+    if result is None and check.get("override") is None:
         return {"gate": gate, "override": summary, "evaluation": evaluation}
     override = None if result is None else {"result": result, "reason": reason,
         "by": state["principal_id"], "role": state["principal"]["role"], "via": via,

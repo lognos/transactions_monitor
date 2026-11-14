@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AuditPanel } from "@/components/audit-panel";
 import { ChatPanel, type ChatMessage } from "@/components/chat-panel";
 import { ReferencesDialog, TransactionDetails } from "@/components/review-dialogs";
-import { MicrosoftLogo, TsxMark } from "@/components/tsx-mark";
+import { AuditFlowMark, MicrosoftLogo } from "@/components/brand-mark";
 import { Badge, Button } from "@/components/ui";
 import { api, getApiMode, setPrincipal } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -271,7 +271,10 @@ export default function Home() {
       {/* Sidebar: a narrow rail that expands over the content on hover or keyboard focus. */}
       <div className="relative shrink-0 lg:w-14">
       <aside aria-label="Sidebar" className="group/side flex flex-col gap-4 border-b border-border-subtle bg-surface-1 p-4 lg:absolute lg:inset-y-0 lg:left-0 lg:z-30 lg:w-14 lg:overflow-hidden lg:border-r lg:border-b-0 lg:px-2.5 lg:transition-[width,box-shadow] lg:duration-200 lg:hover:w-72 lg:hover:shadow-2xl lg:focus-within:w-72 lg:focus-within:shadow-2xl">
-        <h1><TsxMark /></h1>
+        <h1 className="flex items-center gap-3">
+          <AuditFlowMark />
+          <span className={cn("text-xl font-medium tracking-tight", reveal)}>auditflow ai</span>
+        </h1>
         <div className="flex flex-col gap-3 lg:mt-auto">
           <div className="flex flex-wrap gap-2 lg:hidden lg:group-hover/side:flex lg:group-focus-within/side:flex">
             {mode !== "backend" && <Badge tone="attention">{mode === "fixtures" ? "Fixture demo" : "Mixed data sources"}</Badge>}
@@ -300,7 +303,10 @@ export default function Home() {
 
       {!principalId ? <div className="flex flex-1 items-center justify-center p-6">
         <section aria-labelledby="login-title" className="flex w-full max-w-md flex-col items-center gap-8">
-          <TsxMark size="lg" />
+          <div className="flex items-center gap-4">
+            <AuditFlowMark className="size-14" />
+            <span className="text-3xl font-medium tracking-tight">auditflow ai</span>
+          </div>
           <h2 id="login-title" className="sr-only">Sign in</h2>
           {principals.isPending && <p role="status" className="flex items-center gap-2 text-sm text-text-muted"><LoaderCircle className="size-4 animate-spin" aria-hidden="true" />Loading…</p>}
           {principals.data && !people.length && <p className="text-sm text-text-muted">No identities are seeded yet.</p>}

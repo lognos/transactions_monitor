@@ -96,18 +96,24 @@ async def run_review(*, eval_id: str, principal_id: str, review_input: dict[str,
 
     review_input: {"kind": "question", "question": str}
                or {"kind": "decision", "verdict": "approved" | "rejected", "comments": str | None}
-               or {"kind": "override", "criterion_id": str, "result": str | None, "reason": str}
+               or {"kind": "override", "criterion_id": str, "result": "pass" | "flag" | "no_pass" | None,
+                   "reason": str, "via": "panel" | "chat"}   (result None = revert)
 
     Returns the keys the server needs:
-      question -> {"answer", "evaluation"}
+      question -> {"answer", "evaluation", "override"}  (override set when the question asked for one)
       decision -> {"gate", "decision", "txn", "memory_created"}  (decision is None when denied)
+                  or {"blocking_checks": [...]} when approving with checks still failing
+      override -> {"gate", "evaluation", "override"}
     """
     state = await review_graph.ainvoke(
         {"eval_id": eval_id, "principal_id": principal_id, "input": review_input}
     )
     return {
         key: state.get(key)
-        for key in ("answer", "evaluation", "gate", "decision", "txn", "memory_created", "override", "blocking_checks")
+        for key in (
+            "answer", "evaluation", "gate", "decision", "txn", "memory_created",
+            "override", "blocking_checks",
+        )
     }
 
 

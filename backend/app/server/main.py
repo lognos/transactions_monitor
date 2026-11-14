@@ -71,6 +71,7 @@ async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
             "amount": {"$type": "number"},
             "currency": {"$type": "string"},
             "status": {"$in": ["pending", "awaiting_review", "passed", "rejected"]},
+            "created_at": {"$type": ["date", "string"]},
         }]}},
         {"$sort": {"created_at": 1, "txn_id": 1}},
         {"$lookup": {

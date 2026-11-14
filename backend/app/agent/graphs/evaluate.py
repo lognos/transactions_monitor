@@ -65,6 +65,7 @@ class EvalState(TypedDict, total=False):
     adjustments: List[Dict[str, Any]]
     llm_output: Dict[str, Any]
     evaluation: Dict[str, Any]
+    previous_evaluation: Dict[str, Any] | None
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,7 @@ async def load(state: EvalState) -> Dict[str, Any]:
     if not customer:
         raise KeyError(f"Customer not found: {txn['customer_id']}")
 
+    existing = None
     if state.get("refresh"):
         existing = await db["evaluations"].find_one(
             {"txn_id": txn_id, "status": "awaiting_review"}, {"_id": 0},
@@ -103,7 +105,7 @@ async def load(state: EvalState) -> Dict[str, Any]:
     if not policy:
         raise KeyError(f"No active policy for txn_type={txn['type']}")
 
-    return {"txn": txn, "customer": customer, "policy": policy}
+    return {"txn": txn, "customer": customer, "policy": policy, "previous_evaluation": existing}
 
 
 async def run_checks(state: EvalState) -> Dict[str, Any]:
@@ -345,6 +347,8 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         else "pass"
     )
     failed_ids = [c["criterion_id"] for c in merged_checks if c.get("result") == "no_pass"]
+    # Reviewer overrides sit beside the agent's result (contracts §8); none yet.
+    merged_checks = [{**c, "effective_result": c["result"], "override": None} for c in merged_checks]
 
     eval_id = new_id("EVAL")
     actor = agent_actor(principal_id)
@@ -357,6 +361,7 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         "policy_version": policy.get("version", 1),
         "checks": merged_checks,
         "recommendation": recommendation,
+        "effective_recommendation": recommendation,
         "rationale": llm_output.get("rationale", ""),
         "precedents_used": all_precedents_used,
         "adjustments_used": all_adjustments_used,
@@ -366,11 +371,12 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
     }
 
     writes = []
-    if refresh:
+    previous = state.get("previous_evaluation")
+    if refresh and previous:
         writes.append(
             make_update(
                 "evaluations",
-                {"txn_id": txn["txn_id"], "status": "awaiting_review"},
+                {"eval_id": previous["eval_id"], "status": "awaiting_review", "checks": previous["checks"]},
                 {"$set": {"status": "superseded"}},
             )
         )

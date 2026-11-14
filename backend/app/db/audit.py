@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from pymongo import ReturnDocument
+
+from app.db.client import get_client, get_db
+
 GENESIS_HASH = "0" * 64
 
 
@@ -32,11 +36,15 @@ def compute_hash(prev_hash: str, event: dict[str, Any]) -> str:
     return hashlib.sha256((prev_hash + canonical_json(event)).encode()).hexdigest()
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 async def write_with_audit(
     *,
     actor: dict[str, Any],
     event: str,
-    txn_id: str,
+    txn_id: str | None,
     ref: dict[str, str],
     detail: dict[str, Any],
     writes: list[Write],
@@ -46,22 +54,24 @@ async def write_with_audit(
     Steps (docs/plan-db.md): bump chain_head.seq, build the event with
     prev_hash = chain_head.hash, apply writes, insert the event, update chain_head.
     """
-    from app.db.client import get_db
-
+    client = get_client()
     db = get_db()
+    ts = _utc_now_iso()
 
-    async def apply(session):
+    async def _txn(session: Any) -> dict[str, Any]:
         head = await db.chain_head.find_one_and_update(
             {"_id": "head"},
             {"$inc": {"seq": 1}, "$setOnInsert": {"hash": GENESIS_HASH}},
             upsert=True,
+            return_document=ReturnDocument.AFTER,
             session=session,
         )
-        seq = head["seq"] + 1 if head else 1
-        prev_hash = head["hash"] if head else GENESIS_HASH
-        entry = {
-            "seq": seq,
-            "ts": datetime.now(timezone.utc).isoformat(),
+        new_seq = int(head["seq"])
+        prev_hash = str(head["hash"])
+
+        event_body: dict[str, Any] = {
+            "seq": new_seq,
+            "ts": ts,
             "actor": actor,
             "event": event,
             "txn_id": txn_id,
@@ -69,29 +79,38 @@ async def write_with_audit(
             "detail": detail,
             "prev_hash": prev_hash,
         }
-        entry["hash"] = compute_hash(prev_hash, entry)
-        for write in writes:
-            collection = db[write.collection]
-            if write.op == "insert":
-                await collection.insert_one(dict(write.document), session=session)
-            else:
-                result = await collection.update_one(write.filter, write.update, session=session)
-                if result.matched_count != 1:
-                    raise ValueError(f"Missing document for audited update in {write.collection}")
-        await db.audit_log.insert_one(entry.copy(), session=session)
-        await db.chain_head.update_one(
-            {"_id": "head"}, {"$set": {"hash": entry["hash"]}}, session=session,
-        )
-        return entry
+        event_hash = compute_hash(prev_hash, event_body)
+        audit_doc = {**event_body, "hash": event_hash}
 
-    async with db.client.start_session() as session:
-        return await session.with_transaction(apply)
+        for w in writes:
+            col = db[w.collection]
+            if w.op == "insert":
+                if w.document is None:
+                    raise ValueError(f"Insert write on {w.collection} missing document")
+                await col.insert_one(dict(w.document), session=session)
+            elif w.op == "update":
+                if w.filter is None or w.update is None:
+                    raise ValueError(f"Update write on {w.collection} missing filter/update")
+                result = await col.update_one(w.filter, w.update, session=session)
+                if result.matched_count != 1:
+                    raise ValueError(f"Missing or changed document for audited update in {w.collection}")
+            else:
+                raise ValueError(f"Unsupported write op: {w.op}")
+
+        await db.audit_log.insert_one(dict(audit_doc), session=session)
+        await db.chain_head.update_one(
+            {"_id": "head"},
+            {"$set": {"hash": event_hash}},
+            session=session,
+        )
+        return audit_doc
+
+    async with client.start_session() as session:
+        return await session.with_transaction(_txn)
 
 
 async def verify_chain() -> dict[str, Any]:
     """Return {"ok", "checked", "broken_at_seq", "reason"}."""
-    from app.db.client import get_db
-
     db = get_db()
     events = await db.audit_log.find({}, {"_id": 0}).sort("seq", 1).to_list(length=None)
 

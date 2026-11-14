@@ -6,15 +6,26 @@ from app.db.client import get_db
 
 
 async def check_gate(
-    *, principal: dict[str, Any], txn: dict[str, Any], evaluation: dict[str, Any], verdict: str | None = None,
-    action: str = "decision", check: dict[str, Any] | None = None
+    *,
+    principal: dict[str, Any],
+    txn: dict[str, Any],
+    evaluation: dict[str, Any],
+    verdict: str | None = None,
+    action: str = "decision",
+    check: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return {"result": "allow" | "deny", "rule_id": str | None, "reason": str}.
+
+    Gates a decision (action="decision") or a check override (action="override",
+    with the check being overridden). Contract: docs/contracts.md §5.2 and §8.
 
     Deny, in this order:
       1. no decision rule for the principal's role
       2. txn amount over the rule's max_amount
-      3. an override targets a hard check and the rule disallows hard overrides
+      3. override only: the check is hard and the rule has can_override_hard_fail false
+
+    Whether every failed check was cleared before approving is a precondition
+    checked by the caller, not a gate rule.
     """
     db = get_db()
     txn_type = txn.get("type")
@@ -23,7 +34,7 @@ async def check_gate(
         return {
             "result": "deny",
             "rule_id": None,
-            "reason": f"No active policy found for transaction type '{txn_type}'.",
+            "reason": f"Evaluation policy version not found for transaction type '{txn_type}'.",
         }
 
     role = principal.get("role")
@@ -35,7 +46,7 @@ async def check_gate(
         return {
             "result": "deny",
             "rule_id": None,
-            "reason": f"Role '{role}' is not authorized to decide transactions.",
+            "reason": f"Role '{role}' is not authorized to {'override checks' if action == 'override' else 'decide transactions'}.",
         }
 
     rule_id = rule.get("rule_id")
@@ -45,12 +56,19 @@ async def check_gate(
         return {
             "result": "deny",
             "rule_id": rule_id,
-            "reason": f"Amount {amount} exceeds {role} limit {max_amount}. A supervisor must decide.",
+            "reason": f"Amount {amount} exceeds {role} limit {max_amount}. A supervisor must {'authorize this override' if action == 'override' else 'decide'}.",
         }
 
-    if action == "override" and check and check.get("kind") == "hard" and not rule.get("can_override_hard_fail", False):
-        return {"result": "deny", "rule_id": rule_id,
-                "reason": "This role cannot override a hard check under the policy."}
+    if (
+        action == "override"
+        and (check or {}).get("kind") == "hard"
+        and not rule.get("can_override_hard_fail", False)
+    ):
+        return {
+            "result": "deny",
+            "rule_id": rule_id,
+            "reason": f"Role '{role}' may not override hard check {(check or {}).get('criterion_id')}.",
+        }
 
     return {
         "result": "allow",

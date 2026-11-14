@@ -1,0 +1,49 @@
+{
+  "subject": "[FINTRAC REGULATORY ALERT] UPCOMING_QUARTER: Mandatory Travel Rule Threshold Lowering and ISO 20022 MX Validation Standa (Effective: 2027-01-01)",
+  "recipients": [
+    "aml-compliance@bank.example.ca",
+    "payments-tech-lead@bank.example.ca"
+  ],
+  "assessment": {
+    "notice_id": "sim_travel_iso20022_20261114_173005",
+    "title": "Mandatory Travel Rule Threshold Lowering and ISO 20022 MX Validation Standards in effect as of January 1, 2027",
+    "category": "NOTICE_TO_REPORTING_ENTITIES",
+    "publication_date": "2026-11-20",
+    "effective_date": "2027-01-01",
+    "effective_clause": "in effect as of January 1, 2027",
+    "urgency_badge": "UPCOMING_QUARTER",
+    "days_remaining": 48,
+    "url": "https://fintrac-canafe.canada.ca/notices-avis/2026-11-20-eng",
+    "executive_summary": "FINTRAC has released a regulatory update under category 'NOTICE_TO_REPORTING_ENTITIES': \"Mandatory Travel Rule Threshold Lowering and ISO 20022 MX Validation Standards in effect as of January 1, 2027\". This policy notice carries an effective compliance date of 2027-01-01 (UPCOMING_QUARTER). The update impacts institutional obligations under Proceeds of Crime (Money Laundering) and Terrorist Financing Act (PCMLTFA) & FINTRAC Directives, mandating proactive verification across bank payment processing systems and AI risk validation models.",
+    "statutory_references": [
+      "Proceeds of Crime (Money Laundering) and Terrorist Financing Act (PCMLTFA) & FINTRAC Directives"
+    ],
+    "impacted_rails": [
+      "Core Transaction Processing & Client Due Diligence"
+    ],
+    "hard_check_adjustments": [
+      "Update schema validation and mandatory payload field enforcement in transaction ingestion pipeline.",
+      "Verify deterministic boundary filters (e.g. country codes, threshold checks, mandatory beneficiary/originator identifiers)."
+    ],
+    "judgment_check_adjustments": [
+      "Update LangGraph agent ML/TF indicator prompt to incorporate latest FINTRAC advisory patterns.",
+      "Calibrate anomaly scoring weights for transactions with unusual velocity or jurisdiction hops.",
+      "Refine human-reviewer question prompt templates for compliance escalations."
+    ],
+    "business_actions": [
+      "Review operational compliance procedures against the new guidance published at https://fintrac-canafe.canada.ca/notices-avis/2026-11-20-eng.",
+      "Assess exposure across client accounts and update AML Risk Tolerance thresholds by 2027-01-01.",
+      "Coordinate with Financial Crime Operations for reviewer training on updated indicators.",
+      "Document regulatory delta in the Enterprise Compliance Ledger for OSFI/FINTRAC audit readiness."
+    ],
+    "technology_actions": [
+      "Audit existing deterministic hard-check rules in backend/app/checks.py to align with updated requirements.",
+      "Verify whether payment gateway ingestion payloads (SWIFT, ACSS, Interac) require new mandatory fields.",
+      "Execute automated regression testing against benchmark test scenarios in docs/plan-scenarios.md.",
+      "Deploy updated validation gate into staging environment prior to the 2027-01-01 enforcement deadline."
+    ],
+    "generated_at": "2026-11-14T17:30:05.418884+00:00"
+  },
+  "dry_run": true,
+  "timestamp": "20261114_173005"
+}
