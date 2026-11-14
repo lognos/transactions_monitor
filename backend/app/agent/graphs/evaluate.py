@@ -337,6 +337,8 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         else "pass"
     )
     failed_ids = [c["criterion_id"] for c in merged_checks if c.get("result") == "no_pass"]
+    # Reviewer overrides sit beside the agent's result (contracts §8); none yet.
+    merged_checks = [{**c, "effective_result": c["result"], "override": None} for c in merged_checks]
 
     eval_id = new_id("EVAL")
     actor = agent_actor(principal_id)
@@ -349,6 +351,7 @@ async def save_evaluation(state: EvalState) -> Dict[str, Any]:
         "policy_version": policy.get("version", 1),
         "checks": merged_checks,
         "recommendation": recommendation,
+        "effective_recommendation": recommendation,
         "rationale": llm_output.get("rationale", ""),
         "precedents_used": all_precedents_used,
         "adjustments_used": all_adjustments_used,

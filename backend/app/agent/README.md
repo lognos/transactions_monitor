@@ -50,7 +50,7 @@ decide_out = await review_graph.ainvoke({
     "principal_id": "ana",
     "input": {
         "kind": "decision",
-        "verdict": "validated_with_comments",
+        "verdict": "approved",
         "comments": "Payroll customers spike at month-end, that is normal.",
     },
 })

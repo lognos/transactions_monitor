@@ -54,6 +54,8 @@ AUDIT_LOG_SCHEMA = {
             "enum": [
                 "evaluation.created",
                 "question.answered",
+                "check.overridden",
+                "check.override_reverted",
                 "decision.denied",
                 "decision.recorded",
                 "memory.created",

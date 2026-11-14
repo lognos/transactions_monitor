@@ -1159,8 +1159,8 @@ CHECKS: Dict[str, Callable[[dict, dict, dict, Any], Awaitable[dict]]] = {
 # 6. Default Policy Checklists (Contracts §3.4 & Plan-Scenarios §Policies)
 # ---------------------------------------------------------------------------
 _COMMON_RULES = [
-    {"rule_id": "D-01", "role": "analyst", "max_amount": 50000, "can_override_hard_fail": False},
-    {"rule_id": "D-02", "role": "supervisor", "max_amount": None, "can_override_hard_fail": False},
+    {"rule_id": "D-01", "role": "analyst", "max_amount": 50000, "can_override_hard_fail": True},
+    {"rule_id": "D-02", "role": "supervisor", "max_amount": None, "can_override_hard_fail": True},
 ]
 
 _SHARED_HARD_CRITERIA = [

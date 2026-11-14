@@ -182,8 +182,8 @@ TRANSACTIONS: list[dict] = [
 ]
 
 _DECISION_RULES: list[dict] = [
-    {"rule_id": "D-01", "role": "analyst", "max_amount": 50000, "can_override_hard_fail": False},
-    {"rule_id": "D-02", "role": "supervisor", "max_amount": None, "can_override_hard_fail": False},
+    {"rule_id": "D-01", "role": "analyst", "max_amount": 50000, "can_override_hard_fail": True},
+    {"rule_id": "D-02", "role": "supervisor", "max_amount": None, "can_override_hard_fail": True},
 ]
 
 _SANCTIONS_PARAMS = {"names": ["Vanguard Shadow Corp", "Onyx Shell Holdings", "Redstar Trading Co"]}

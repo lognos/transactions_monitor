@@ -63,7 +63,16 @@ async def list_principals() -> dict[str, Any]:
 
 async def _transaction_rows(query: dict[str, Any]) -> list[dict[str, Any]]:
     cursor = await get_db().transactions.aggregate([
-        {"$match": query},
+        # Raw CSV imports may share this collection, but they are not runnable
+        # queue transactions until ingestion supplies the contracted fields.
+        {"$match": {"$and": [query, {
+            "txn_id": {"$type": "string"},
+            "type": {"$type": "string"},
+            "amount": {"$type": "number"},
+            "currency": {"$type": "string"},
+            "status": {"$in": ["pending", "awaiting_review", "passed", "rejected"]},
+            "created_at": {"$type": ["date", "string"]},
+        }]}},
         {"$sort": {"created_at": 1, "txn_id": 1}},
         {"$lookup": {
             "from": "customers", "localField": "customer_id",
