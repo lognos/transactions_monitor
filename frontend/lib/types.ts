@@ -26,10 +26,22 @@ export interface Transaction {
   status: TxnStatus;
   created_at: string;
   type_specific?: Record<string, unknown>;
-  // Added by GET /transactions:
-  customer_name?: string;
-  counterparty_name?: string;
-  eval_id?: string | null;
+}
+
+// GET /transactions returns a summary, not the full source transaction.
+export interface TransactionSummary {
+  txn_id: string;
+  type: TxnType;
+  amount: number;
+  currency: string;
+  customer_name: string;
+  counterparty_name: string;
+  memo?: string;
+  status: TxnStatus;
+  eval_id: string | null;
+  recommendation: Recommendation | null;
+  failed_checks: string[];
+  created_at: string;
 }
 
 export interface Customer {
@@ -94,7 +106,7 @@ export interface Evaluation {
   precedents_used: string[];
   adjustments_used: string[];
   thread: ThreadItem[];
-  status: "awaiting_review" | "decided";
+  status: "awaiting_review" | "decided" | "superseded";
   created_at: string;
   transaction: Transaction;
   customer: Customer;
@@ -112,7 +124,7 @@ export interface AuditEvent {
   ts: string;
   actor: { id: string; type: string; role: Role; on_behalf_of: string | null };
   event: string;
-  txn_id: string;
+  txn_id: string | null;
   ref: { collection: string; id: string };
   detail: Record<string, unknown>;
   prev_hash: string;
@@ -142,4 +154,50 @@ export interface VerifyResponse {
   checked: number;
   broken_at_seq: number | null;
   reason: string | null;
+}
+
+export interface EvaluatePendingResponse {
+  evaluated: {
+    txn_id: string;
+    eval_id: string;
+    recommendation: Recommendation;
+    changed: boolean;
+  }[];
+  failed: { txn_id: string; error: string }[];
+}
+
+export interface ChatResponse {
+  answer: string;
+  citations: Citation[];
+}
+
+export interface ReferencesResponse {
+  check: Pick<Check, "criterion_id" | "result" | "source" | "evidence">;
+  policy: {
+    txn_type: TxnType;
+    version: number;
+    criterion_id: string;
+    description: string;
+    kind: Check["kind"];
+    regulation_ref: string;
+    params: Record<string, unknown>;
+  };
+  adjustments: {
+    memory_id: string;
+    text: string;
+    condition: string;
+    author_id: string;
+    author_name: string | null;
+    source_txn_id: string;
+    created_at: string;
+  }[];
+  precedents: {
+    memory_id: string;
+    text: string;
+    author_id: string;
+    author_name: string | null;
+    source_txn_id: string | null;
+    verdict: Verdict | null;
+    created_at: string;
+  }[];
 }

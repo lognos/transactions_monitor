@@ -5,6 +5,9 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
+
+from app.server.serialization import public_data
 
 
 class ApiError(Exception):
@@ -16,7 +19,23 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def api_error(_: Request, exc: ApiError) -> JSONResponse:
         body = {"error": {"code": exc.code, "message": exc.message}, **exc.extra}
-        return JSONResponse(body, status_code=exc.status)
+        return JSONResponse(public_data(body), status_code=exc.status)
+
+    @app.exception_handler(HTTPException)
+    async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
+        code = "not_found" if exc.status_code == 404 else "http_error"
+        return JSONResponse(
+            {"error": {"code": code, "message": str(exc.detail)}},
+            status_code=exc.status_code,
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            {"error": {"code": "internal_error", "message": "The request could not be completed."}},
+            status_code=500,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
