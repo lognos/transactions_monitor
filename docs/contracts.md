@@ -198,7 +198,7 @@ Updated in the same transaction as each audit insert. This serializes writers.
 
 ## 4. HTTP API
 
-Base URL `http://localhost:8000`. JSON in and out. Header `X-Principal-Id` on every call.
+Base URL `http://localhost:8010` (port 8000 is taken on some of our machines). JSON in and out. Header `X-Principal-Id` on every call.
 
 | # | Method and path | Purpose |
 | --- | --- | --- |
@@ -323,6 +323,20 @@ Judgment criteria (no function): C-04 (all types), W-03 (wire).
 async def search_memory(*, query: str, txn_type: str, kind: str, k: int = 4) -> list[dict]
 async def active_adjustments(*, txn_type: str) -> list[dict]   # plain find, no vector search
 ```
+
+### 5.5 Agent entry points
+The only two functions the server imports from `app.agent`. Owned by the Agent lane.
+```python
+async def run_evaluate(*, txn_id: str, principal_id: str) -> dict
+# -> {"evaluation", "transaction", "customer"}
+
+async def run_review(*, eval_id: str, principal_id: str, review_input: dict) -> dict
+# review_input: {"kind": "question", "question": str}
+#            or {"kind": "decision", "verdict": str, "comments": str | None}
+# -> question: {"answer", "evaluation"}
+# -> decision: {"gate", "decision", "txn", "memory_created"}   (decision is None when the gate denies)
+```
+The server turns these into the HTTP responses in §4, including the 403 on a gate denial. A function that is not built yet raises `NotImplementedError`, which the server returns as `501 not_implemented`.
 
 ## 6. LLM structured outputs
 

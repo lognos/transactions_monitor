@@ -1,6 +1,6 @@
 # Plan 3 — Agent (LangGraph)
 
-Owner: Ben. Shapes and names come from [contracts.md](contracts.md).
+Owner: buddybud24. Shapes and names come from [contracts.md](contracts.md).
 
 ## Goal
 
@@ -89,9 +89,9 @@ Prompt rules to write in:
 ## Files
 
 ```
-backend/app/
-  main.py            FastAPI routes (the 8 calls in contracts §4), principal header, error mapping
-  models.py          Pydantic models: API bodies, RecommendOutput, AnswerOutput, LearnOutput
+backend/app/agent/
+  service.py         run_evaluate, run_review: the only functions the server calls (contracts §5.5)
+  schemas.py         RecommendOutput, AnswerOutput, LearnOutput
   checks.py          CHECKS registry
   memory.py          search_memory, active_adjustments, precedent text template
   prompts.py         three prompt templates
@@ -99,9 +99,11 @@ backend/app/
   graphs/evaluate.py EvalState, nodes, compiled graph
   graphs/review.py   ReviewState, nodes, compiled graph
 ```
-`db.py`, `audit.py`, `gate.py` belong to the DB lane.
+The scaffold is in place: both graphs compile with their edges and routing, and every node raises `NotImplementedError` until it is written.
 
-Packages: `langgraph`, a LangChain chat-model package for whichever key the team has, `pymongo`, `fastapi`, `uvicorn`, `pydantic`.
+`backend/app/db/` belongs to the DB lane. `backend/app/server/` (FastAPI routes) belongs to the UI owner, so this lane has no HTTP code. Where the steps below mention an endpoint, the Agent lane's part is the matching `run_evaluate` / `run_review` path.
+
+Packages (already in `pyproject.toml`): `langgraph`, `langchain`, `langchain-google-genai`, `pymongo`, `fastapi`, `uvicorn`, `pydantic`.
 Tracing: `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`.
 
 ## Steps
