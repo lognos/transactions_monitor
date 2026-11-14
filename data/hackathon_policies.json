@@ -1,0 +1,142 @@
+[
+  {
+    "txn_type": "wire",
+    "version": 1,
+    "active": true,
+    "criteria": [
+      {
+        "id": "C-01",
+        "description": "Counterparty and originator are not on a sanctions list",
+        "kind": "hard",
+        "check": "sanctions_screen",
+        "params": {
+          "names": [
+            "Demo Sanctions Entity",
+            "Northstar Restricted Trading"
+          ]
+        },
+        "regulation_ref": "Special Economic Measures Act and Canadian sanctions directives"
+      },
+      {
+        "id": "C-03",
+        "description": "Transaction is not a duplicate",
+        "kind": "hard",
+        "check": "duplicate",
+        "params": {},
+        "regulation_ref": "Payments Canada Rule A4"
+      },
+      {
+        "id": "C-04",
+        "description": "Amount is consistent with the customer's usual profile",
+        "kind": "judgment",
+        "check": null,
+        "params": {
+          "ratio_hint": 3
+        },
+        "regulation_ref": "FINTRAC suspicious-transaction indicators"
+      },
+      {
+        "id": "W-01",
+        "description": "Originator and beneficiary name, address, and account number are present",
+        "kind": "hard",
+        "check": "travel_rule_fields",
+        "params": {},
+        "regulation_ref": "PCMLTFA Regulations, travel rule sections 138-141"
+      },
+      {
+        "id": "W-02",
+        "description": "International transfers of CAD 10,000 or more are flagged for EFT reporting",
+        "kind": "hard",
+        "check": "eft_report_threshold",
+        "params": {
+          "threshold_cad": 10000
+        },
+        "regulation_ref": "PCMLTFA section 9.1"
+      },
+      {
+        "id": "W-03",
+        "description": "A new beneficiary or high-risk destination is explained",
+        "kind": "judgment",
+        "check": null,
+        "params": {},
+        "regulation_ref": "FINTRAC suspicious-transaction indicators"
+      }
+    ],
+    "decision_rules": [
+      {
+        "rule_id": "D-01",
+        "role": "analyst",
+        "max_amount": 50000,
+        "can_override_hard_fail": false
+      },
+      {
+        "rule_id": "D-02",
+        "role": "supervisor",
+        "max_amount": null,
+        "can_override_hard_fail": false
+      }
+    ]
+  },
+  {
+    "txn_type": "cheque",
+    "version": 1,
+    "active": true,
+    "criteria": [
+      {
+        "id": "C-01",
+        "description": "Counterparty and drawer are not on a sanctions list",
+        "kind": "hard",
+        "check": "sanctions_screen",
+        "params": {
+          "names": [
+            "Demo Sanctions Entity",
+            "Northstar Restricted Trading"
+          ]
+        },
+        "regulation_ref": "Special Economic Measures Act and Canadian sanctions directives"
+      },
+      {
+        "id": "C-03",
+        "description": "Cheque is not a duplicate presentment",
+        "kind": "hard",
+        "check": "duplicate",
+        "params": {},
+        "regulation_ref": "Payments Canada Rule A4"
+      },
+      {
+        "id": "C-04",
+        "description": "Amount is consistent with the customer's usual profile",
+        "kind": "judgment",
+        "check": null,
+        "params": {
+          "ratio_hint": 3
+        },
+        "regulation_ref": "FINTRAC suspicious-transaction indicators"
+      },
+      {
+        "id": "Q-01",
+        "description": "Cheque is not stale-dated or post-dated",
+        "kind": "hard",
+        "check": "cheque_date_valid",
+        "params": {
+          "max_age_days": 180
+        },
+        "regulation_ref": "Payments Canada Rule A1 and Bills of Exchange Act section 26"
+      }
+    ],
+    "decision_rules": [
+      {
+        "rule_id": "D-01",
+        "role": "analyst",
+        "max_amount": 50000,
+        "can_override_hard_fail": false
+      },
+      {
+        "rule_id": "D-02",
+        "role": "supervisor",
+        "max_amount": null,
+        "can_override_hard_fail": false
+      }
+    ]
+  }
+]

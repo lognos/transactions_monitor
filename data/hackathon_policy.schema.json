@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lognos/transactions_monitor/data/hackathon_policy.schema.json",
+  "title": "AuditFlow hackathon policy collection",
+  "description": "Seed-ready policy documents for the wire and cheque transaction checklists.",
+  "type": "array",
+  "minItems": 2,
+  "items": {
+    "$ref": "#/$defs/policy"
+  },
+  "contains": {
+    "type": "object",
+    "properties": {
+      "txn_type": {
+        "const": "wire"
+      }
+    },
+    "required": [
+      "txn_type"
+    ]
+  },
+  "allOf": [
+    {
+      "contains": {
+        "type": "object",
+        "properties": {
+          "txn_type": {
+            "const": "cheque"
+          }
+        },
+        "required": [
+          "txn_type"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "kind",
+        "check",
+        "params",
+        "regulation_ref"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(C|W|Q)-[0-9]{2}$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "hard",
+            "judgment"
+          ]
+        },
+        "check": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "params": {
+          "type": "object"
+        },
+        "regulation_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "judgment"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "check": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "check": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "decisionRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "role",
+        "max_amount",
+        "can_override_hard_fail"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "enum": [
+            "analyst",
+            "supervisor"
+          ]
+        },
+        "max_amount": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "can_override_hard_fail": {
+          "const": false
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "txn_type",
+        "version",
+        "active",
+        "criteria",
+        "decision_rules"
+      ],
+      "properties": {
+        "txn_type": {
+          "enum": [
+            "wire",
+            "cheque"
+          ]
+        },
+        "version": {
+          "const": 1
+        },
+        "active": {
+          "const": true
+        },
+        "criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/criterion"
+          }
+        },
+        "decision_rules": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/decisionRule"
+          }
+        }
+      }
+    }
+  }
+}
