@@ -34,7 +34,7 @@ A LangGraph agent evaluates bank transactions against a checklist, recommends pa
 | Scenarios | Tixa | `backend/scripts/seed.py`, `docs/pitch.md` |
 
 Import rules between backend packages:
-- `app.server` imports `app.agent` only through `run_evaluate` and `run_review`, and reads MongoDB for lists and lookups.
+- `app.server` imports `app.agent` only through `run_evaluate`, `run_review` and `run_chat`, and reads MongoDB for lists and lookups.
 - `app.agent` imports `app.db`. It never imports `app.server`.
 - `app.db` imports neither.
 

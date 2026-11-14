@@ -7,7 +7,7 @@ const sans = Inter({ variable: "--font-inter", subsets: ["latin"], weight: ["300
 const mono = Roboto_Mono({ variable: "--font-roboto-mono", subsets: ["latin"], weight: ["400", "500"] });
 
 export const metadata: Metadata = {
-  title: "Transaction Validation",
+  title: "TSX - Validation",
   description: "An auditable agent that validates bank transactions",
 };
 

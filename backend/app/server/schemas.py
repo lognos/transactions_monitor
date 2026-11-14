@@ -9,6 +9,14 @@ class AskBody(BaseModel):
     question: str
 
 
+class ChatBody(BaseModel):
+    message: str
+
+
+class EvaluatePendingBody(BaseModel):
+    refresh: bool = False
+
+
 class DecideBody(BaseModel):
     verdict: Literal["validated", "validated_with_comments", "rejected"]
     comments: str | None = None
